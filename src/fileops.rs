@@ -110,8 +110,15 @@ pub fn transfer_item(
     let mut done = Vec::with_capacity(plan.len());
     for (src, dst) in plan {
         if let Err(e) = transfer_one(&src, &dst, kind) {
-            rollback(&done, kind);
-            return TransferOutcome::Failed(format!("{}: {e}", src.display()));
+            let incomplete = rollback(&done, kind);
+            let mut msg = format!("{}: {e}", src.display());
+            if !incomplete.is_empty() {
+                msg.push_str("; rollback incomplete:");
+                for (src, dst) in incomplete {
+                    msg.push_str(&format!(" {} could not be restored to {}", dst.display(), src.display()));
+                }
+            }
+            return TransferOutcome::Failed(msg);
         }
         done.push((src, dst));
     }
@@ -165,19 +172,36 @@ fn copy_verified(src: &Path, dst: &Path) -> io::Result<()> {
     result
 }
 
-fn rollback(done: &[(PathBuf, PathBuf)], kind: OpKind) {
+fn rollback(done: &[(PathBuf, PathBuf)], kind: OpKind) -> Vec<(PathBuf, PathBuf)> {
+    let mut incomplete = Vec::new();
     for (src, dst) in done.iter().rev() {
-        match kind {
+        let failed = match kind {
             OpKind::Copy => {
-                let _ = fs::remove_file(dst);
+                // For copy, just need to delete the destination
+                fs::remove_file(dst).is_err()
             }
             OpKind::Move => {
-                if fs::rename(dst, src).is_err() && copy_verified(dst, src).is_ok() {
-                    let _ = fs::remove_file(dst);
+                // For move, try rename first, then copy+remove
+                let rename_ok = fs::rename(dst, src).is_ok();
+                if rename_ok {
+                    false // success
+                } else {
+                    // rename failed, try copy+remove
+                    match copy_verified(dst, src) {
+                        Ok(()) => {
+                            // copy succeeded, try to remove dst
+                            fs::remove_file(dst).is_err()
+                        }
+                        Err(_) => true, // copy failed
+                    }
                 }
             }
+        };
+        if failed {
+            incomplete.push((src.clone(), dst.clone()));
         }
     }
+    incomplete
 }
 
 #[cfg(test)]
@@ -351,5 +375,31 @@ mod tests {
         assert!(matches!(out, TransferOutcome::Done(_)));
         assert!(!p.exists());
         assert_eq!(fs::read_to_string(dst_dir.path().join("a.jpg")).unwrap(), "content");
+    }
+
+    #[test]
+    fn rollback_reports_incomplete_undos() {
+        // Create a temp directory structure
+        let tmp = tempfile::tempdir().unwrap();
+        let src_dir = tmp.path().join("src");
+        let dst_dir = tmp.path().join("dst");
+        fs::create_dir(&src_dir).unwrap();
+        fs::create_dir(&dst_dir).unwrap();
+
+        let src = src_dir.join("IMG_1.CR3");
+        let dst = dst_dir.join("IMG_1.CR3");
+
+        // Create destination file (simulating a successfully transferred file)
+        write(&dst, "content");
+
+        // Remove the source directory to make rollback fail
+        fs::remove_dir(&src_dir).unwrap();
+
+        // Try to rollback
+        let incomplete = rollback(&[(src.clone(), dst.clone())], OpKind::Move);
+
+        // Should report the pair as incomplete
+        assert_eq!(incomplete.len(), 1);
+        assert_eq!(incomplete[0], (src, dst));
     }
 }
