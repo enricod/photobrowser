@@ -109,6 +109,22 @@ fn row_to_record(r: &rusqlite::Row) -> rusqlite::Result<FileRecord> {
     })
 }
 
+/// Classify whether an error indicates actual corruption (not transient failures).
+/// Only NotADatabase, DatabaseCorrupt, and schema mismatch are considered corruption.
+fn is_corruption(e: &IndexError) -> bool {
+    use rusqlite::ErrorCode;
+    match e {
+        IndexError::SchemaMismatch => true,
+        IndexError::Db(rusqlite::Error::SqliteFailure(sqlite_err, _)) => {
+            matches!(
+                sqlite_err.code,
+                ErrorCode::NotADatabase | ErrorCode::DatabaseCorrupt
+            )
+        }
+        _ => false,
+    }
+}
+
 pub struct Index {
     conn: Connection,
 }
@@ -122,19 +138,26 @@ impl Index {
     }
 
     /// Opens (or creates) the index; a corrupt or outdated file is deleted and rebuilt.
+    /// Transient errors (locked, permission denied, I/O) are returned unchanged.
     pub fn open(path: &Path) -> Result<Index> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
         match Self::try_open(path) {
             Ok(index) => Ok(index),
-            Err(_) => {
-                for suffix in ["", "-wal", "-shm"] {
-                    let mut p = path.as_os_str().to_owned();
-                    p.push(suffix);
-                    let _ = std::fs::remove_file(p);
+            Err(e) => {
+                if is_corruption(&e) {
+                    // Delete corrupted database and all WAL/SHM files
+                    for suffix in ["", "-wal", "-shm"] {
+                        let mut p = path.as_os_str().to_owned();
+                        p.push(suffix);
+                        let _ = std::fs::remove_file(p);
+                    }
+                    Self::try_open(path)
+                } else {
+                    // Transient error: return it unchanged
+                    Err(e)
                 }
-                Self::try_open(path)
             }
         }
     }
@@ -423,5 +446,50 @@ mod tests {
         idx.upsert_many(&[FileRecord::new(path.clone(), 1, 1)]).unwrap();
         let loaded = idx.load_folder(Path::new("/p")).unwrap();
         assert!(loaded.contains_key(&path));
+    }
+
+    #[test]
+    fn is_corruption_classifier() {
+        use rusqlite::ErrorCode;
+
+        // SchemaMismatch is corruption
+        assert!(is_corruption(&IndexError::SchemaMismatch));
+
+        // Io error is NOT corruption (transient)
+        let io_err = IndexError::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "test",
+        ));
+        assert!(!is_corruption(&io_err));
+
+        // NotADatabase is corruption
+        let not_db_err = IndexError::Db(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: ErrorCode::NotADatabase,
+                extended_code: 0,
+            },
+            None,
+        ));
+        assert!(is_corruption(&not_db_err));
+
+        // DatabaseCorrupt is corruption
+        let corrupt_err = IndexError::Db(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: ErrorCode::DatabaseCorrupt,
+                extended_code: 0,
+            },
+            None,
+        ));
+        assert!(is_corruption(&corrupt_err));
+
+        // DatabaseBusy is NOT corruption (transient)
+        let busy_err = IndexError::Db(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: ErrorCode::DatabaseBusy,
+                extended_code: 0,
+            },
+            None,
+        ));
+        assert!(!is_corruption(&busy_err));
     }
 }
