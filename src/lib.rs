@@ -1,4 +1,5 @@
 pub mod catalog;
+pub mod decode;
 pub mod exif;
 pub mod filter;
 pub mod index;
