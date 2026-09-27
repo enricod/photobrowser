@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::path::PathBuf;
 
 use adw::prelude::*;
@@ -75,13 +76,28 @@ pub fn build(app: &adw::Application, start_folder: Option<PathBuf>) {
     let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
     scroll.set_propagation_phase(gtk::PropagationPhase::Capture);
     let s = state.clone();
+    let scroll_accum = Cell::new(0.0_f64);
     scroll.connect_scroll(move |ctl, _dx, dy| {
-        if ctl.current_event_state().contains(gtk::gdk::ModifierType::CONTROL_MASK) {
-            s.zoom_thumbs(if dy < 0.0 { 1 } else { -1 });
-            glib::Propagation::Stop
-        } else {
-            glib::Propagation::Proceed
+        if !ctl.current_event_state().contains(gtk::gdk::ModifierType::CONTROL_MASK) {
+            scroll_accum.set(0.0);
+            return glib::Propagation::Proceed;
         }
+        if dy == 0.0 {
+            return glib::Propagation::Stop;
+        }
+        // Touchpads deliver many small deltas per gesture; wheels deliver ±1.0 per notch.
+        // Accumulate and step once per whole unit crossed, in either direction.
+        let mut acc = scroll_accum.get() + dy;
+        while acc <= -1.0 {
+            s.zoom_thumbs(1);
+            acc += 1.0;
+        }
+        while acc >= 1.0 {
+            s.zoom_thumbs(-1);
+            acc -= 1.0;
+        }
+        scroll_accum.set(acc);
+        glib::Propagation::Stop
     });
     grid_scroller.add_controller(scroll);
 

@@ -69,6 +69,8 @@ pub struct AppState {
     xmp_tx: mpsc::Sender<XmpJob>,
     xmp_inflight: RefCell<HashMap<PathBuf, u32>>,
     xmp_failures: Cell<u32>,
+    /// Pending debounced config-file write, if any (see `zoom_thumbs`).
+    config_save_source: RefCell<Option<glib::SourceId>>,
 }
 
 fn capacity(n: usize) -> NonZeroUsize {
@@ -169,6 +171,7 @@ impl AppState {
             xmp_tx,
             xmp_inflight: RefCell::default(),
             xmp_failures: Cell::new(0),
+            config_save_source: RefCell::new(None),
         })
     }
 
@@ -543,15 +546,30 @@ impl AppState {
         }
     }
 
-    pub fn zoom_thumbs(&self, step: i32) {
+    pub fn zoom_thumbs(self: &Rc<Self>, step: i32) {
         use super::style::{set_thumb_size, THUMB_SIZE_MAX, THUMB_SIZE_MIN, THUMB_SIZE_STEP};
         let mut config = self.config.borrow_mut();
         let size = (config.thumb_display_size + step * THUMB_SIZE_STEP).clamp(THUMB_SIZE_MIN, THUMB_SIZE_MAX);
         if size != config.thumb_display_size {
             config.thumb_display_size = size;
             set_thumb_size(size);
-            let _ = config.save_to(&Config::default_path());
+            drop(config);
+            self.schedule_config_save();
         }
+    }
+
+    /// Debounces the config-file write: a burst of zoom steps (e.g. touchpad scroll) saves
+    /// once, ~500 ms after the last change, instead of once per step.
+    fn schedule_config_save(self: &Rc<Self>) {
+        if let Some(id) = self.config_save_source.borrow_mut().take() {
+            id.remove();
+        }
+        let s = self.clone();
+        let id = glib::timeout_add_local_once(Duration::from_millis(500), move || {
+            s.config_save_source.borrow_mut().take();
+            let _ = s.config.borrow().save_to(&Config::default_path());
+        });
+        *self.config_save_source.borrow_mut() = Some(id);
     }
 
     // ---- rating --------------------------------------------------------------
