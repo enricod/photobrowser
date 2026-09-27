@@ -1,6 +1,7 @@
 pub mod catalog;
 pub mod decode;
 pub mod exif;
+pub mod fileops;
 pub mod filter;
 pub mod index;
 pub mod jobs;
