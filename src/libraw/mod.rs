@@ -146,7 +146,7 @@ impl Raw {
             let data_ptr = std::ptr::addr_of!((*img.0).data) as *const u8;
             let rgb = std::slice::from_raw_parts(data_ptr, data_size as usize);
             let mut rgba = Vec::with_capacity(w as usize * h as usize * 4);
-            for px in rgb.chunks_exact(3) {
+            for px in rgb.as_chunks::<3>().0 {
                 rgba.extend_from_slice(&[px[0], px[1], px[2], 255]);
             }
             Ok(Rgba::new(w, h, rgba))

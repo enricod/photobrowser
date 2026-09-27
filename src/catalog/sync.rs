@@ -103,13 +103,12 @@ pub fn reconcile_item(item: &mut Item, records: &mut HashMap<PathBuf, FileRecord
 
     let mut changed = Vec::new();
     for f in &item.files {
-        if let Some(rec) = records.get_mut(&f.path) {
-            if rec.rating != rating || rec.rejected != rejected {
-                rec.rating = rating;
-                rec.rejected = rejected;
-                rec.xmp_dirty = true;
-                changed.push(f.path.clone());
-            }
+        if let Some(rec) = records.get_mut(&f.path)
+            && (rec.rating != rating || rec.rejected != rejected) {
+            rec.rating = rating;
+            rec.rejected = rejected;
+            rec.xmp_dirty = true;
+            changed.push(f.path.clone());
         }
     }
 

@@ -15,22 +15,19 @@ fn needed_edge(target_edge: u32) -> u32 {
 pub fn decode_raw_preview(path: &Path, target_edge: u32) -> Result<(Rgba, u8), DecodeError> {
     let needed = needed_edge(target_edge);
 
-    if let Ok(meta) = exif::open_path(path) {
-        if let Some(data) = largest_exiv2_preview(&meta, needed) {
-            if let Ok(img) = jpeg::decode_jpeg(&data, target_edge) {
-                return Ok((img, exif::orientation(&meta)));
-            }
-        }
+    if let Ok(meta) = exif::open_path(path)
+        && let Some(data) = largest_exiv2_preview(&meta, needed)
+        && let Ok(img) = jpeg::decode_jpeg(&data, target_edge) {
+        return Ok((img, exif::orientation(&meta)));
     }
 
     let mut raw = Raw::open(path)?;
     let orientation = flip_to_orientation(raw.flip());
     if let Ok(Some(data)) = raw.thumbnail_jpeg() {
         let big_enough = jpeg::dimensions(&data).is_some_and(|(w, h)| w.max(h) >= needed);
-        if big_enough {
-            if let Ok(img) = jpeg::decode_jpeg(&data, target_edge) {
-                return Ok((img, orientation));
-            }
+        if big_enough
+            && let Ok(img) = jpeg::decode_jpeg(&data, target_edge) {
+            return Ok((img, orientation));
         }
     }
     Ok((raw.decode(true)?, 1))

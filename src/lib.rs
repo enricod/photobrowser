@@ -1,4 +1,5 @@
 pub mod catalog;
+pub mod config;
 pub mod decode;
 pub mod exif;
 pub mod fileops;

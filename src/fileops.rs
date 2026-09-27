@@ -371,7 +371,7 @@ mod tests {
         }
         let p = src_dir.path().join("a.jpg");
         write(&p, "content");
-        let out = transfer_item(&[p.clone()], dst_dir.path(), OpKind::Move, ConflictPolicy::Skip);
+        let out = transfer_item(std::slice::from_ref(&p), dst_dir.path(), OpKind::Move, ConflictPolicy::Skip);
         assert!(matches!(out, TransferOutcome::Done(_)));
         assert!(!p.exists());
         assert_eq!(fs::read_to_string(dst_dir.path().join("a.jpg")).unwrap(), "content");
