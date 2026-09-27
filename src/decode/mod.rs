@@ -60,15 +60,13 @@ impl From<crate::libraw::LibRawError> for DecodeError {
 }
 
 fn orientation_of_buffer(data: &[u8]) -> u8 {
-    crate::exif::init();
-    rexiv2::Metadata::new_from_buffer(data)
+    crate::exif::open_buffer(data)
         .map(|m| crate::exif::orientation(&m))
         .unwrap_or(1)
 }
 
 fn orientation_of_path(path: &Path) -> u8 {
-    crate::exif::init();
-    rexiv2::Metadata::new_from_path(path)
+    crate::exif::open_path(path)
         .map(|m| crate::exif::orientation(&m))
         .unwrap_or(1)
 }

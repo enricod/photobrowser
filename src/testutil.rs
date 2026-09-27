@@ -30,8 +30,7 @@ pub fn write_tiff(path: &Path, w: u32, h: u32, rgb: [u8; 3]) {
 
 /// Writes one EXIF tag into an existing image file.
 pub fn set_exif(path: &Path, tag: &str, value: &str) {
-    crate::exif::init();
-    let meta = rexiv2::Metadata::new_from_path(path).unwrap();
+    let meta = crate::exif::open_path(path).unwrap();
     meta.set_tag_string(tag, value).unwrap();
-    meta.save_to_file(path).unwrap();
+    crate::exif::save(&meta, path).unwrap();
 }

@@ -1,7 +1,20 @@
 use std::path::Path;
-use std::sync::Once;
+use std::sync::{Once, PoisonError, RwLock};
 
 static INIT: Once = Once::new();
+
+/// Serialises exiv2's XMP encode against XMP decode.
+///
+/// `Exiv2::XmpParser::encode` (run by every save) deletes and re-registers each
+/// custom namespace (e.g. `darktable`) in the XMP SDK's process-global table and
+/// iterates exiv2's namespace registry without its mutex. A decode running in
+/// between fails with "XMP Toolkit error 101: Unregistered schema namespace URI",
+/// which exiv2 only logs: the sidecar opens with *no* XMP at all. Decodes are safe
+/// among themselves (each SDK call takes the SDK's own lock), so opening takes the
+/// shared side and saving the exclusive side. gexiv2 offers no way to pass a lock
+/// to `XmpParser::initialize`, and that lock would only cover namespace
+/// registration anyway, not the decode.
+static EXIV2_LOCK: RwLock<()> = RwLock::new(());
 
 /// Initialises exiv2 once per process. Call before any rexiv2 use.
 pub fn init() {
@@ -10,6 +23,27 @@ pub fn init() {
         rexiv2::set_log_level(rexiv2::LogLevel::MUTE);
         let _ = rexiv2::register_xmp_namespace("http://darktable.sf.net/", "darktable");
     });
+}
+
+/// Opens a file's metadata. Always use this (not `rexiv2::Metadata::new_from_path`).
+pub fn open_path(path: &Path) -> Result<rexiv2::Metadata, rexiv2::Rexiv2Error> {
+    init();
+    let _shared = EXIV2_LOCK.read().unwrap_or_else(PoisonError::into_inner);
+    rexiv2::Metadata::new_from_path(path)
+}
+
+/// Parses metadata from an in-memory image. Always use this (not `rexiv2::Metadata::new_from_buffer`).
+pub fn open_buffer(data: &[u8]) -> Result<rexiv2::Metadata, rexiv2::Rexiv2Error> {
+    init();
+    let _shared = EXIV2_LOCK.read().unwrap_or_else(PoisonError::into_inner);
+    rexiv2::Metadata::new_from_buffer(data)
+}
+
+/// Writes metadata back to `path`. Always use this (not `Metadata::save_to_file`).
+pub fn save(meta: &rexiv2::Metadata, path: &Path) -> Result<(), rexiv2::Rexiv2Error> {
+    init();
+    let _exclusive = EXIV2_LOCK.write().unwrap_or_else(PoisonError::into_inner);
+    meta.save_to_file(path)
 }
 
 /// Parses EXIF "YYYY:MM:DD HH:MM:SS" as a naive timestamp (treated as UTC; used only for sorting).
@@ -27,8 +61,7 @@ pub fn orientation(meta: &rexiv2::Metadata) -> u8 {
 }
 
 pub fn capture_time(path: &Path) -> Option<i64> {
-    init();
-    let meta = rexiv2::Metadata::new_from_path(path).ok()?;
+    let meta = open_path(path).ok()?;
     ["Exif.Photo.DateTimeOriginal", "Exif.Image.DateTime"]
         .iter()
         .find_map(|tag| meta.get_tag_string(tag).ok().and_then(|s| parse_exif_datetime(&s)))
@@ -59,8 +92,7 @@ impl ExifInfo {
 }
 
 pub fn read_info(path: &Path) -> ExifInfo {
-    init();
-    let Ok(meta) = rexiv2::Metadata::new_from_path(path) else {
+    let Ok(meta) = open_path(path) else {
         return ExifInfo::default();
     };
     let s = |tag: &str| {
@@ -134,7 +166,7 @@ mod tests {
         set_exif(&path, "Exif.Photo.DateTimeOriginal", "2026:09:01 10:15:30");
         set_exif(&path, "Exif.Image.Orientation", "6");
         assert_eq!(capture_time(&path), Some(1_788_257_730));
-        let meta = rexiv2::Metadata::new_from_path(&path).unwrap();
+        let meta = open_path(&path).unwrap();
         assert_eq!(orientation(&meta), 6);
     }
 
