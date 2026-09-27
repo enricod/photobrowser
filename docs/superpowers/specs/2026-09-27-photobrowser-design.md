@@ -1,7 +1,7 @@
 # Photobrowser — Design Spec
 
 Date: 2026-09-27
-Status: Draft, awaiting review
+Status: Approved 2026-09-27; amended by the implementation plan
 
 ## 1. Purpose
 
@@ -99,9 +99,10 @@ file is its own item.
 - Destination chooser: GTK folder dialog plus a list of the 10 most recently
   used destinations (stored in the index).
 - `Ctrl+Shift+M` repeats a move to the last destination without a dialog.
-- Name conflicts: dialog with **Skip** / **Rename** (append `_1`, `_2`, … to
-  all files of the item consistently) / **Cancel**, plus "apply to all".
-  Never overwrite silently.
+- Name conflicts: one dialog per batch, before anything is transferred:
+  **Skip Existing** / **Keep Both** (append `_1`, `_2`, … to all files of the
+  item consistently) / **Cancel**. The choice applies to every conflicting
+  item in the batch. Never overwrite silently.
 - Same filesystem: `rename(2)`. Different filesystem: copy → fsync → verify
   size → delete source.
 - Per-item atomicity: if any file of an item fails, files of that item already
@@ -141,13 +142,14 @@ and a thin texture adapter.
 ```rust
 enum FileKind { Jpeg, Png, Tiff, Raw }
 
-struct MediaFile { path: PathBuf, kind: FileKind, size: u64, mtime: SystemTime }
+struct MediaFile { path: PathBuf, kind: FileKind, size: u64, mtime_ns: i64 }
 
 struct Item {
     id: ItemId,              // stable within a session
     base_name: String,
     files: Vec<MediaFile>,   // 1 or 2 (pair)
-    capture_time: Option<DateTime>,
+    sort_time: i64,          // capture time (unix s), else display file mtime
+    sort_name: String,       // lower-cased display file name
     rating: u8,              // 0..=5
     rejected: bool,
 }
@@ -160,7 +162,8 @@ struct Item {
 
 ```sql
 CREATE TABLE files (
-  path TEXT PRIMARY KEY,
+  path BLOB PRIMARY KEY,           -- raw path bytes (non-UTF-8 safe)
+  folder BLOB NOT NULL,            -- parent directory, indexed
   size INTEGER NOT NULL,
   mtime_ns INTEGER NOT NULL,
   capture_time INTEGER,          -- unix seconds, NULL if unknown
@@ -169,7 +172,7 @@ CREATE TABLE files (
   xmp_synced_at INTEGER,         -- mtime of sidecar at last sync
   xmp_dirty INTEGER NOT NULL DEFAULT 0
 );
-CREATE TABLE recent_destinations (path TEXT PRIMARY KEY, used_at INTEGER);
+CREATE TABLE recent_destinations (path BLOB PRIMARY KEY, used_at INTEGER);
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);  -- schema_version
 ```
 
@@ -206,8 +209,8 @@ source of truth for ratings).
 
 | Format | Thumbnail (256 px) | Full view |
 |---|---|---|
-| JPEG | EXIF thumbnail if ≥ 160 px wide, else turbojpeg 1/8 scale | turbojpeg at the smallest DCT scale ≥ screen size |
-| RAW | Largest embedded preview (exiv2), downscaled | Same preview; `Z`/100% → full LibRaw decode |
+| JPEG | turbojpeg at the smallest DCT scale ≥ 256 px (EXIF thumbnails are skipped: usually 160 px and blurry at grid sizes) | turbojpeg at the smallest DCT scale ≥ screen size |
+| RAW | Largest embedded preview (exiv2, then LibRaw thumbnail), downscaled | Same preview; `Z`/100% → full LibRaw decode |
 | PNG/TIFF | `image` decode + downscale | `image` decode + downscale to screen |
 
 - A RAW with no preview (or preview < 1024 px for full view) falls back to
@@ -218,8 +221,9 @@ source of truth for ratings).
 
 ### 5.3 Caching
 
-- **Disk:** `$XDG_CACHE_HOME/photobrowser/thumbs/<hash>.webp`, 256 px long
-  edge, where `hash = blake3(path ‖ mtime_ns ‖ size)`. Stale entries are
+- **Disk:** `$XDG_CACHE_HOME/photobrowser/thumbs/<hash>.jpg` (JPEG q85:
+  libjpeg-turbo encodes/decodes it in < 1 ms; the `image` crate's WebP encoder
+  is lossless-only), 256 px long edge, where `hash = blake3(path ‖ mtime_ns ‖ size)`. Stale entries are
   unreachable by construction; a size-capped cleanup (default 2 GB, oldest
   first) runs at startup in the background.
 - **Memory:** LRU of ~300 thumbnail textures; LRU of ~6 screen-sized full-view
@@ -230,7 +234,10 @@ source of truth for ratings).
 
 - Workers = `max(1, num_cpus - 1)`.
 - Priorities (high → low): current full view → visible thumbnails →
-  prefetch ±2 → near-visible thumbnails → background warm-up.
+  prefetch ±2 → background disk-cache warm-up. (GridView already binds rows
+  just outside the viewport, so they count as visible.)
+- XMP writes run on one dedicated thread (ordered, never concurrent per file);
+  move/copy runs on its own thread; neither uses the decode pool.
 - Every job carries a generation/cancellation token checked before start;
   jobs for items scrolled out of range or for a closed folder are dropped.
 - Results cross to the main thread via `async_channel` +
@@ -297,7 +304,7 @@ limits, disk cache cap, last opened folder.
 | RAW without usable preview | LibRaw half-size fallback |
 | XMP write fails | Rating kept in index, `xmp_dirty = 1`, toast "Couldn't write XMP for N files", retried on next folder open |
 | Sidecar changed externally | Imported on rescan (sidecar newer than `xmp_synced_at` wins) |
-| Destination name conflict | Skip / Rename / Cancel dialog with "apply to all"; never overwrite |
+| Destination name conflict | One Skip Existing / Keep Both / Cancel prompt per batch; never overwrite |
 | Cross-filesystem move failure | Original kept; partial item transfers rolled back |
 | Index corrupt / schema mismatch | Delete and rebuild from scan + sidecars |
 | Folder deleted/unmounted while open | Toast, grid cleared, return to "Open Folder" state |
@@ -317,8 +324,10 @@ against null/invalid handles in the FFI wrapper.
   - fileops: conflicts (skip/rename), rollback after an injected failure,
     sidecars moving with their files;
   - index invalidation on mtime/size change; schema-mismatch rebuild.
-- **Integration tests** over `tests/fixtures/` with small JPEG (with/without
-  EXIF thumbnail, rotated), PNG, TIFF, and a small DNG.
+- **Fixture tests**: JPEG (plain, rotated), PNG and TIFF files are generated
+  in the tests; a real darktable sidecar lives in `tests/fixtures/`. RAW tests
+  run against a folder of the user's own RAW files named by `PB_RAW_SAMPLES`
+  (skipped, with a message, when unset).
 - **Benchmarks** (`criterion`): thumbnail decode per format; scan of a
   generated 2,000-file folder.
 - **Manual acceptance** on a real folder of the user's RAW files, checking
