@@ -22,7 +22,8 @@ use crate::thumbcache::DiskCache;
 
 /// Results sent from worker threads to the GTK main thread.
 pub enum Msg {
-    Thumb { id: ItemId, generation: u64, result: Result<Rgba, String> },
+    /// `serial` identifies the request; a result whose serial is no longer pending is stale.
+    Thumb { id: ItemId, generation: u64, serial: u64, result: Result<Rgba, String> },
     Scanned { generation: u64, result: Result<ScanResult, String> },
 }
 
@@ -50,7 +51,9 @@ pub struct AppState {
     objects: RefCell<HashMap<ItemId, ItemObject>>,
     /// How many list cells currently show each item (grid + filmstrip).
     bound: RefCell<HashMap<ItemId, u32>>,
-    pending_thumbs: RefCell<HashMap<ItemId, CancelToken>>,
+    /// In-flight thumbnail request per item: (request serial, cancel token).
+    pending_thumbs: RefCell<HashMap<ItemId, (u64, CancelToken)>>,
+    next_thumb_serial: Cell<u64>,
     thumb_lru: RefCell<LruCache<ItemId, ()>>,
     folder: RefCell<Option<PathBuf>>,
     /// Bumped on every folder change; results from older generations are dropped.
@@ -124,6 +127,7 @@ impl AppState {
             objects: RefCell::default(),
             bound: RefCell::default(),
             pending_thumbs: RefCell::default(),
+            next_thumb_serial: Cell::new(0),
             thumb_lru: RefCell::new(LruCache::new(capacity(thumb_cap))),
             folder: RefCell::new(None),
             generation: Cell::new(0),
@@ -171,7 +175,7 @@ impl AppState {
 
     pub fn handle(self: &Rc<Self>, msg: Msg) {
         match msg {
-            Msg::Thumb { id, generation, result } => self.on_thumb(id, generation, result),
+            Msg::Thumb { id, generation, serial, result } => self.on_thumb(id, generation, serial, result),
             Msg::Scanned { generation, result } => self.on_scanned(generation, result),
         }
     }
@@ -220,7 +224,7 @@ impl AppState {
         self.generation.set(self.generation.get() + 1);
         self.first_scan_done.set(false);
         self.pool.clear();
-        for (_, token) in self.pending_thumbs.borrow_mut().drain() {
+        for (_, (_, token)) in self.pending_thumbs.borrow_mut().drain() {
             token.cancel();
         }
         // Empty the model first: its cells unbind (and touch the LRU) while items still exist.
@@ -256,10 +260,7 @@ impl AppState {
         {
             self.store.remove(pos);
         }
-        let pending = self.pending_thumbs.borrow_mut().remove(&id);
-        if let Some(token) = pending {
-            token.cancel();
-        }
+        self.cancel_thumb(id);
         self.thumb_lru.borrow_mut().pop(&id);
     }
 
@@ -318,6 +319,8 @@ impl AppState {
             }
             obj.set_item(item);
             if update.display_changed {
+                // A request still in flight decodes the old file: supersede it.
+                self.cancel_thumb(obj.id());
                 obj.set_thumbnail(None);
                 obj.set_error(None);
                 self.thumb_lru.borrow_mut().pop(&obj.id());
@@ -367,10 +370,7 @@ impl AppState {
         if still_bound {
             return;
         }
-        let pending = self.pending_thumbs.borrow_mut().remove(&id);
-        if let Some(token) = pending {
-            token.cancel();
-        }
+        self.cancel_thumb(id);
         // A texture kept while bound but pushed out of the LRU goes back under its control.
         let tracked = self.thumb_lru.borrow().contains(&id);
         if obj.thumbnail().is_some() && !tracked {
@@ -388,7 +388,9 @@ impl AppState {
             return;
         }
         let token = CancelToken::new();
-        self.pending_thumbs.borrow_mut().insert(id, token.clone());
+        let serial = self.next_thumb_serial.get() + 1;
+        self.next_thumb_serial.set(serial);
+        self.pending_thumbs.borrow_mut().insert(id, (serial, token.clone()));
         let file = obj.with_item(|i| i.display_file().clone());
         let (disk, tx, generation) = (self.disk.clone(), self.tx.clone(), self.generation.get());
         self.pool.submit(priority, token, move || {
@@ -400,14 +402,31 @@ impl AppState {
                     })
                     .map_err(|e| e.to_string()),
             };
-            let _ = tx.send_blocking(Msg::Thumb { id, generation, result });
+            let _ = tx.send_blocking(Msg::Thumb { id, generation, serial, result });
         });
     }
 
-    fn on_thumb(&self, id: ItemId, generation: u64, result: Result<Rgba, String>) {
-        self.pending_thumbs.borrow_mut().remove(&id);
+    /// Cancels and forgets the in-flight thumbnail request for `id`, if any.
+    fn cancel_thumb(&self, id: ItemId) {
+        let pending = self.pending_thumbs.borrow_mut().remove(&id);
+        if let Some((_, token)) = pending {
+            token.cancel();
+        }
+    }
+
+    fn on_thumb(&self, id: ItemId, generation: u64, serial: u64, result: Result<Rgba, String>) {
         if generation != self.generation.get() {
             return;
+        }
+        {
+            // Only the current request for this item may install its result.
+            let mut pending = self.pending_thumbs.borrow_mut();
+            match pending.get(&id) {
+                Some((current, _)) if *current == serial => {
+                    pending.remove(&id);
+                }
+                _ => return,
+            }
         }
         let Some(obj) = self.object(id) else { return };
         match result {
