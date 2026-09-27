@@ -4,7 +4,7 @@ use adw::prelude::*;
 use gtk::glib;
 
 use super::state::{AppState, Widgets};
-use super::{grid, keys, style};
+use super::{filterbar, grid, keys, style};
 
 pub fn build(app: &adw::Application, start_folder: Option<PathBuf>) {
     let (tx, rx) = async_channel::unbounded();
@@ -27,6 +27,8 @@ pub fn build(app: &adw::Application, start_folder: Option<PathBuf>) {
     counter.add_css_class("dim-label");
     counter.add_css_class("numeric");
     header.pack_end(&counter);
+    let filters = filterbar::build(&state);
+    header.set_title_widget(Some(&filters));
 
     let grid = grid::build(&state);
     let grid_scroller = gtk::ScrolledWindow::builder()
@@ -58,7 +60,7 @@ pub fn build(app: &adw::Application, start_folder: Option<PathBuf>) {
     toolbar.set_content(Some(&toasts));
     window.set_content(Some(&toolbar));
 
-    let _ = state.widgets.set(Widgets { window: window.clone(), toasts, stack, grid, counter });
+    let _ = state.widgets.set(Widgets { window: window.clone(), toasts, stack, grid, counter, filters });
 
     for button in [&open_button, &empty_button] {
         let s = state.clone();
@@ -66,6 +68,22 @@ pub fn build(app: &adw::Application, start_folder: Option<PathBuf>) {
     }
     let s = state.clone();
     state.selection.connect_items_changed(move |_, _, _, _| s.update_counter());
+
+    let s = state.clone();
+    state.selection.connect_selection_changed(move |_, _, _| s.unpin());
+
+    let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
+    scroll.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let s = state.clone();
+    scroll.connect_scroll(move |ctl, _dx, dy| {
+        if ctl.current_event_state().contains(gtk::gdk::ModifierType::CONTROL_MASK) {
+            s.zoom_thumbs(if dy < 0.0 { 1 } else { -1 });
+            glib::Propagation::Stop
+        } else {
+            glib::Propagation::Proceed
+        }
+    });
+    grid_scroller.add_controller(scroll);
 
     let key_controller = gtk::EventControllerKey::new();
     key_controller.set_propagation_phase(gtk::PropagationPhase::Capture);

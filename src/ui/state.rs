@@ -3,7 +3,9 @@ use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::mpsc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
@@ -11,6 +13,7 @@ use lru::LruCache;
 
 use super::item_object::ItemObject;
 use crate::catalog::diff::diff_items;
+use crate::catalog::rating::{self, RatingChange};
 use crate::catalog::sync::{self, ScanResult};
 use crate::config::Config;
 use crate::decode::{self, Quality, Rgba, THUMB_EDGE};
@@ -19,12 +22,14 @@ use crate::index::{FileRecord, Index};
 use crate::jobs::{CancelToken, JobPool, Priority};
 use crate::media::{Item, ItemId, MediaFile};
 use crate::thumbcache::DiskCache;
+use crate::xmp;
 
 /// Results sent from worker threads to the GTK main thread.
 pub enum Msg {
     /// `serial` identifies the request; a result whose serial is no longer pending is stale.
     Thumb { id: ItemId, generation: u64, serial: u64, result: Result<Rgba, String> },
     Scanned { generation: u64, result: Result<ScanResult, String> },
+    XmpWritten { path: PathBuf, result: Result<i64, String> },
 }
 
 pub struct Widgets {
@@ -33,6 +38,7 @@ pub struct Widgets {
     pub stack: gtk::Stack,
     pub grid: gtk::GridView,
     pub counter: gtk::Label,
+    pub filters: gtk::Box,
 }
 
 pub struct AppState {
@@ -60,6 +66,9 @@ pub struct AppState {
     generation: Cell<u64>,
     next_id: Cell<ItemId>,
     first_scan_done: Cell<bool>,
+    xmp_tx: mpsc::Sender<XmpJob>,
+    xmp_inflight: RefCell<HashMap<PathBuf, u32>>,
+    xmp_failures: Cell<u32>,
 }
 
 fn capacity(n: usize) -> NonZeroUsize {
@@ -77,6 +86,29 @@ pub fn texture_from(img: Rgba) -> gdk::Texture {
         stride,
     )
     .upcast()
+}
+
+pub struct XmpJob {
+    pub path: PathBuf,
+    pub rating: u8,
+    pub rejected: bool,
+}
+
+/// One writer thread: sidecar writes are serialised and ordered.
+fn spawn_xmp_writer(tx: async_channel::Sender<Msg>) -> mpsc::Sender<XmpJob> {
+    let (job_tx, job_rx) = mpsc::channel::<XmpJob>();
+    std::thread::Builder::new()
+        .name("pb-xmp".into())
+        .spawn(move || {
+            for job in job_rx {
+                let result = xmp::write_rating(&job.path, job.rating, job.rejected).map_err(|e| e.to_string());
+                if tx.send_blocking(Msg::XmpWritten { path: job.path, result }).is_err() {
+                    break;
+                }
+            }
+        })
+        .expect("failed to spawn XMP writer");
+    job_tx
 }
 
 impl AppState {
@@ -110,6 +142,7 @@ impl AppState {
         let sorted = gtk::SortListModel::new(Some(filtered), Some(sorter.clone()));
         let selection = gtk::MultiSelection::new(Some(sorted));
         let thumb_cap = config.thumb_cache_items;
+        let xmp_tx = spawn_xmp_writer(tx.clone());
 
         Rc::new(AppState {
             config: RefCell::new(config),
@@ -133,6 +166,9 @@ impl AppState {
             generation: Cell::new(0),
             next_id: Cell::new(0),
             first_scan_done: Cell::new(false),
+            xmp_tx,
+            xmp_inflight: RefCell::default(),
+            xmp_failures: Cell::new(0),
         })
     }
 
@@ -177,6 +213,7 @@ impl AppState {
         match msg {
             Msg::Thumb { id, generation, serial, result } => self.on_thumb(id, generation, serial, result),
             Msg::Scanned { generation, result } => self.on_scanned(generation, result),
+            Msg::XmpWritten { path, result } => self.on_xmp_written(path, result),
         }
     }
 
@@ -343,6 +380,7 @@ impl AppState {
         self.refilter();
         self.resort();
         self.warm_disk_cache(warm);
+        self.flush_dirty_xmp();
     }
 
     // ---- thumbnails ----------------------------------------------------------
@@ -465,6 +503,144 @@ impl AppState {
                     let _ = disk.store(&file, &img);
                 }
             });
+        }
+    }
+
+    // ---- filtering -----------------------------------------------------------
+
+    /// Changing a filter also releases pinned items.
+    pub fn set_filter(&self, f: impl FnOnce(&mut FilterState)) {
+        {
+            let mut fs = self.filter_state.borrow_mut();
+            f(&mut fs);
+            fs.pinned.clear();
+        }
+        self.refilter();
+    }
+
+    pub fn set_sort(&self, sort: SortState) {
+        self.sort_state.set(sort);
+        self.resort();
+    }
+
+    /// Called when the selection changes: re-rated items may now leave the view.
+    pub fn unpin(self: &Rc<Self>) {
+        let had_pins = {
+            let mut fs = self.filter_state.borrow_mut();
+            let had = !fs.pinned.is_empty();
+            fs.pinned.clear();
+            had
+        };
+        if had_pins {
+            let s = self.clone();
+            glib::idle_add_local_once(move || s.refilter());
+        }
+    }
+
+    pub fn focus_filters(&self) {
+        if let Some(first) = self.widgets().filters.first_child() {
+            first.grab_focus();
+        }
+    }
+
+    pub fn zoom_thumbs(&self, step: i32) {
+        use super::style::{set_thumb_size, THUMB_SIZE_MAX, THUMB_SIZE_MIN, THUMB_SIZE_STEP};
+        let mut config = self.config.borrow_mut();
+        let size = (config.thumb_display_size + step * THUMB_SIZE_STEP).clamp(THUMB_SIZE_MIN, THUMB_SIZE_MAX);
+        if size != config.thumb_display_size {
+            config.thumb_display_size = size;
+            set_thumb_size(size);
+            let _ = config.save_to(&Config::default_path());
+        }
+    }
+
+    // ---- rating --------------------------------------------------------------
+
+    pub fn selected_objects(&self) -> Vec<ItemObject> {
+        let set = self.selection.selection();
+        (0..set.size())
+            .filter_map(|i| self.selection.item(set.nth(i as u32)))
+            .filter_map(|o| o.downcast::<ItemObject>().ok())
+            .collect()
+    }
+
+    /// What a rating/move/copy shortcut applies to.
+    pub fn rating_targets(&self) -> Vec<ItemObject> {
+        self.selected_objects()
+    }
+
+    pub fn rate(self: &Rc<Self>, change: RatingChange) {
+        let targets = self.rating_targets();
+        if targets.is_empty() {
+            return;
+        }
+        self.filter_state
+            .borrow_mut()
+            .pinned
+            .extend(targets.iter().map(ItemObject::id));
+        for obj in &targets {
+            obj.update_item(|item| rating::apply(item, change));
+            let item = obj.item();
+            for file in &item.files {
+                if let Err(e) = self.index.borrow().set_rating(file, item.rating, item.rejected) {
+                    eprintln!("index: {e}");
+                }
+                self.write_xmp(file.path.clone(), item.rating, item.rejected);
+            }
+        }
+    }
+
+    fn write_xmp(&self, path: PathBuf, rating: u8, rejected: bool) {
+        *self.xmp_inflight.borrow_mut().entry(path.clone()).or_insert(0) += 1;
+        let _ = self.xmp_tx.send(XmpJob { path, rating, rejected });
+    }
+
+    fn on_xmp_written(self: &Rc<Self>, path: PathBuf, result: Result<i64, String>) {
+        let last_for_path = {
+            let mut inflight = self.xmp_inflight.borrow_mut();
+            let n = inflight.entry(path.clone()).or_insert(1);
+            *n -= 1;
+            let last = *n == 0;
+            if last {
+                inflight.remove(&path);
+            }
+            last
+        };
+        match result {
+            Ok(mtime) if last_for_path => {
+                let _ = self.index.borrow().mark_xmp_synced(&path, mtime);
+            }
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("XMP write failed for {}: {e}", path.display());
+                let _ = self.index.borrow().mark_xmp_dirty(&path);
+                self.report_xmp_failure();
+            }
+        }
+    }
+
+    /// Collects failures for half a second into one toast.
+    fn report_xmp_failure(self: &Rc<Self>) {
+        let before = self.xmp_failures.get();
+        self.xmp_failures.set(before + 1);
+        if before == 0 {
+            let s = self.clone();
+            glib::timeout_add_local_once(Duration::from_millis(500), move || {
+                let n = s.xmp_failures.replace(0);
+                s.toast(&format!("Couldn't write XMP for {n} file{}", if n == 1 { "" } else { "s" }));
+            });
+        }
+    }
+
+    /// Retries sidecar writes that failed or never ran (e.g. the app was closed).
+    fn flush_dirty_xmp(&self) {
+        let Some(folder) = self.folder() else { return };
+        let dirty = self.index.borrow().dirty_records(&folder).unwrap_or_default();
+        for rec in dirty {
+            let in_flight = self.xmp_inflight.borrow().contains_key(&rec.path);
+            if !in_flight {
+                self.write_xmp(rec.path, rec.rating, rec.rejected);
+            }
         }
     }
 }
