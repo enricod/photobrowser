@@ -1,6 +1,7 @@
 pub mod generic;
 pub mod jpeg;
 pub mod pixels;
+pub mod raw;
 
 use std::fs;
 use std::io;
@@ -38,12 +39,24 @@ pub fn decode_for_display(file: &MediaFile, max_edge: u32, quality: Quality) -> 
             generic::decode_with_image_crate(&file.path)?,
             orientation_of_path(&file.path),
         ),
-        FileKind::Raw => {
-            return Err(DecodeError::Raw("RAW decoding is added in Task 9".into()));
-        }
+        FileKind::Raw => raw::decode_raw_preview(&file.path, max_edge)?,
     };
     let img = pixels::resize_to_fit(img, max_edge, quality);
     Ok(pixels::apply_orientation(img, orientation))
+}
+
+/// Native-resolution decode for the 100% view: the RAW of the item if it has one.
+pub fn decode_actual_size(item: &crate::media::Item) -> Result<Rgba, DecodeError> {
+    match item.raw_file() {
+        Some(raw_file) => raw::decode_raw_full(&raw_file.path),
+        None => decode_for_display(item.display_file(), 0, Quality::High),
+    }
+}
+
+impl From<crate::libraw::LibRawError> for DecodeError {
+    fn from(e: crate::libraw::LibRawError) -> Self {
+        DecodeError::Raw(e.to_string())
+    }
 }
 
 fn orientation_of_buffer(data: &[u8]) -> u8 {
@@ -133,5 +146,13 @@ mod tests {
     fn guarded_turns_panic_into_error() {
         let r: Result<(), DecodeError> = guarded(|| panic!("decoder bug"));
         assert!(matches!(r, Err(DecodeError::Panic)));
+    }
+
+    #[test]
+    fn fake_raw_is_error_not_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("fake.CR3");
+        std::fs::write(&p, b"not a raw file").unwrap();
+        assert!(guarded(|| decode_for_display(&media(p), 256, Quality::Fast)).is_err());
     }
 }
