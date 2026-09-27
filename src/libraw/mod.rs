@@ -89,11 +89,22 @@ impl Raw {
                 return Err(check(err).err().unwrap_or(LibRawError::Format));
             }
             let img = MemImage(img);
-            let r = &*img.0;
-            if r.type_ != sys::LibRaw_image_formats_LIBRAW_IMAGE_JPEG {
+            // Read scalar header fields by value through the raw pointer, never
+            // through a `&libraw_processed_image_t` reference: `data` below is
+            // bindgen's `[u8; 1]` stand-in for the C flexible array member
+            // `data[1]`, and a reference only has provenance over the struct's
+            // nominal (1-byte-data) size.
+            let type_ = std::ptr::addr_of!((*img.0).type_).read();
+            let data_size = std::ptr::addr_of!((*img.0).data_size).read();
+            if type_ != sys::LibRaw_image_formats_LIBRAW_IMAGE_JPEG {
                 return Ok(None);
             }
-            let data = std::slice::from_raw_parts(r.data.as_ptr(), r.data_size as usize);
+            // SAFETY: `data_ptr` is derived from the raw allocation pointer `img.0`
+            // (via `addr_of!`, not through a reference), so it keeps provenance over
+            // the whole allocation made by libraw_dcraw_make_mem_thumb, which is
+            // `data_size` bytes long starting at the `data` field.
+            let data_ptr = std::ptr::addr_of!((*img.0).data) as *const u8;
+            let data = std::slice::from_raw_parts(data_ptr, data_size as usize);
             Ok(Some(data.to_vec()))
         }
     }
@@ -113,12 +124,27 @@ impl Raw {
                 return Err(check(err).err().unwrap_or(LibRawError::Format));
             }
             let img = MemImage(img);
-            let r = &*img.0;
-            if r.type_ != sys::LibRaw_image_formats_LIBRAW_IMAGE_BITMAP || r.colors != 3 || r.bits != 8 {
+            // Read scalar header fields by value through the raw pointer, never
+            // through a `&libraw_processed_image_t` reference: `data` below is
+            // bindgen's `[u8; 1]` stand-in for the C flexible array member
+            // `data[1]`, and a reference only has provenance over the struct's
+            // nominal (1-byte-data) size.
+            let type_ = std::ptr::addr_of!((*img.0).type_).read();
+            let colors = std::ptr::addr_of!((*img.0).colors).read();
+            let bits = std::ptr::addr_of!((*img.0).bits).read();
+            if type_ != sys::LibRaw_image_formats_LIBRAW_IMAGE_BITMAP || colors != 3 || bits != 8 {
                 return Err(LibRawError::Format);
             }
-            let (w, h) = (r.width as u32, r.height as u32);
-            let rgb = std::slice::from_raw_parts(r.data.as_ptr(), r.data_size as usize);
+            let width = std::ptr::addr_of!((*img.0).width).read();
+            let height = std::ptr::addr_of!((*img.0).height).read();
+            let data_size = std::ptr::addr_of!((*img.0).data_size).read();
+            let (w, h) = (width as u32, height as u32);
+            // SAFETY: `data_ptr` is derived from the raw allocation pointer `img.0`
+            // (via `addr_of!`, not through a reference), so it keeps provenance over
+            // the whole allocation made by libraw_dcraw_make_mem_image, which is
+            // `data_size` bytes long starting at the `data` field.
+            let data_ptr = std::ptr::addr_of!((*img.0).data) as *const u8;
+            let rgb = std::slice::from_raw_parts(data_ptr, data_size as usize);
             let mut rgba = Vec::with_capacity(w as usize * h as usize * 4);
             for px in rgb.chunks_exact(3) {
                 rgba.extend_from_slice(&[px[0], px[1], px[2], 255]);
