@@ -69,8 +69,12 @@ impl DiskCache {
             .filter_map(Result::ok)
             .filter_map(|e| {
                 let m = e.metadata().ok()?;
-                m.is_file()
-                    .then(|| (e.path(), m.len(), m.modified().unwrap_or(UNIX_EPOCH)))
+                let path = e.path();
+                let filename = path.file_name()?.to_str()?;
+                // Only process completed cache entries: must be regular files,
+                // not start with '.', and have '.jpg' extension.
+                (m.is_file() && !filename.starts_with('.') && filename.ends_with(".jpg"))
+                    .then(|| (path, m.len(), m.modified().unwrap_or(UNIX_EPOCH)))
             })
             .collect();
         let mut total: u64 = entries.iter().map(|e| e.1).sum();
@@ -168,5 +172,31 @@ mod tests {
         assert_eq!(cache.cleanup().unwrap(), 100);
         assert!(!dir.path().join("old.jpg").exists());
         assert!(dir.path().join("mid.jpg").exists() && dir.path().join("new.jpg").exists());
+    }
+
+    #[test]
+    fn cleanup_skips_temp_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = DiskCache::new(dir.path().to_path_buf(), 150).unwrap();
+        // Create completed cache entries
+        for (i, name) in ["old.jpg", "new.jpg"].iter().enumerate() {
+            let p = dir.path().join(name);
+            fs::write(&p, vec![0u8; 100]).unwrap();
+            File::options()
+                .write(true)
+                .open(&p)
+                .unwrap()
+                .set_modified(UNIX_EPOCH + Duration::from_secs(1000 + i as u64))
+                .unwrap();
+        }
+        // Add a temp file (in-flight write from concurrent store())
+        let tmp_path = dir.path().join(".abc123.456.789.tmp");
+        fs::write(&tmp_path, vec![0u8; 100]).unwrap();
+        // Total is 300 bytes, cap is 150. cleanup() should remove only old.jpg (100 bytes),
+        // leaving new.jpg and the temp file untouched.
+        assert_eq!(cache.cleanup().unwrap(), 100);
+        assert!(!dir.path().join("old.jpg").exists());
+        assert!(dir.path().join("new.jpg").exists());
+        assert!(tmp_path.exists(), "temp file must not be deleted by cleanup");
     }
 }
