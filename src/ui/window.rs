@@ -84,6 +84,9 @@ pub fn build(app: &adw::Application, start_folder: Option<PathBuf>) {
     });
 
     let s = state.clone();
+    window.connect_close_request(move |_| s.close_requested());
+
+    let s = state.clone();
     let preferences = gio::ActionEntry::builder("preferences")
         .activate(move |_: &adw::ApplicationWindow, _, _| prefs::show(&s))
         .build();

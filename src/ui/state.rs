@@ -121,7 +121,9 @@ pub struct AppState {
     generation: Cell<u64>,
     next_id: Cell<ItemId>,
     first_scan_done: Cell<bool>,
-    xmp_tx: mpsc::Sender<XmpJob>,
+    /// `None` once the window is closing: the writer thread then drains and exits.
+    xmp_tx: RefCell<Option<mpsc::Sender<XmpJob>>>,
+    xmp_writer: RefCell<Option<std::thread::JoinHandle<()>>>,
     xmp_inflight: RefCell<HashMap<PathBuf, u32>>,
     xmp_failures: Cell<u32>,
     /// Pending debounced config-file write, if any (see `zoom_thumbs`).
@@ -131,6 +133,11 @@ pub struct AppState {
     /// Ids currently accepted into a move/copy batch (spawned or waiting on XMP writes to
     /// drain): `rate()` and `start_transfer()` both skip them to avoid racing the transfer.
     transferring: RefCell<HashSet<ItemId>>,
+    /// Move/copy batches accepted and not yet finished (waiting on XMP writes or running),
+    /// and how many of their items are still to go. Unlike `transferring`, these survive
+    /// a folder change: they gate closing the window, which would kill the transfer thread.
+    batches_active: Cell<usize>,
+    transfer_items_left: Cell<usize>,
     monitor: RefCell<Option<gio::FileMonitor>>,
     rescan_source: RefCell<Option<glib::SourceId>>,
     /// A rescan came in while one was already running: run once more when it finishes,
@@ -189,10 +196,13 @@ pub struct XmpJob {
     pub rejected: bool,
 }
 
-/// One writer thread: sidecar writes are serialised and ordered.
-fn spawn_xmp_writer(tx: async_channel::Sender<Msg>) -> mpsc::Sender<XmpJob> {
+/// One writer thread: sidecar writes are serialised and ordered. It exits once the
+/// returned sender is dropped and every queued job has been written.
+fn spawn_xmp_writer(
+    tx: async_channel::Sender<Msg>,
+) -> (mpsc::Sender<XmpJob>, std::thread::JoinHandle<()>) {
     let (job_tx, job_rx) = mpsc::channel::<XmpJob>();
-    std::thread::Builder::new()
+    let handle = std::thread::Builder::new()
         .name("pb-xmp".into())
         .spawn(move || {
             for job in job_rx {
@@ -210,7 +220,7 @@ fn spawn_xmp_writer(tx: async_channel::Sender<Msg>) -> mpsc::Sender<XmpJob> {
             }
         })
         .expect("failed to spawn XMP writer");
-    job_tx
+    (job_tx, handle)
 }
 
 impl AppState {
@@ -245,7 +255,7 @@ impl AppState {
         let selection = gtk::MultiSelection::new(Some(sorted));
         let thumb_cap = config.thumb_cache_items;
         let full_cap = config.full_cache_items;
-        let xmp_tx = spawn_xmp_writer(tx.clone());
+        let (xmp_tx, xmp_writer) = spawn_xmp_writer(tx.clone());
 
         Rc::new(AppState {
             config: RefCell::new(config),
@@ -273,12 +283,15 @@ impl AppState {
             generation: Cell::new(0),
             next_id: Cell::new(0),
             first_scan_done: Cell::new(false),
-            xmp_tx,
+            xmp_tx: RefCell::new(Some(xmp_tx)),
+            xmp_writer: RefCell::new(Some(xmp_writer)),
             xmp_inflight: RefCell::default(),
             xmp_failures: Cell::new(0),
             config_save_source: RefCell::new(None),
             viewer_resume: Cell::new(None),
             transferring: RefCell::default(),
+            batches_active: Cell::new(0),
+            transfer_items_left: Cell::new(0),
             monitor: RefCell::new(None),
             rescan_source: RefCell::new(None),
             rescan_pending: Cell::new(false),
@@ -1184,12 +1197,15 @@ impl AppState {
     }
 
     fn write_xmp(&self, path: PathBuf, rating: u8, rejected: bool) {
+        let tx = self.xmp_tx.borrow();
+        // Shutting down: the index row stays dirty and the next launch writes it.
+        let Some(tx) = tx.as_ref() else { return };
         *self
             .xmp_inflight
             .borrow_mut()
             .entry(path.clone())
             .or_insert(0) += 1;
-        let _ = self.xmp_tx.send(XmpJob {
+        let _ = tx.send(XmpJob {
             path,
             rating,
             rejected,
@@ -1353,6 +1369,9 @@ impl AppState {
                 transferring.insert(*id);
             }
         }
+        self.batches_active.set(self.batches_active.get() + 1);
+        self.transfer_items_left
+            .set(self.transfer_items_left.get() + jobs.len());
         self.wait_then_run(jobs, dest, kind, policy);
     }
 
@@ -1428,7 +1447,14 @@ impl AppState {
                 let mut first_failure: Option<String> = None;
                 let mut rollback_failures: Vec<String> = Vec::new();
                 for (id, sources) in jobs {
-                    let outcome = fileops::transfer_item(&sources, &dest, kind, policy);
+                    // A panic must still end the batch with `TransfersFinished`: closing
+                    // the window waits for it.
+                    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        fileops::transfer_item(&sources, &dest, kind, policy)
+                    }))
+                    .unwrap_or_else(|_| {
+                        TransferOutcome::Failed("internal error during transfer".into())
+                    });
                     match &outcome {
                         TransferOutcome::Done(_) => done += 1,
                         TransferOutcome::Skipped => skipped += 1,
@@ -1461,6 +1487,8 @@ impl AppState {
     fn on_transferred(&self, id: ItemId, kind: OpKind, outcome: TransferOutcome) {
         // Every outcome (Done, Skipped, Failed) ends this item's part of the batch.
         self.transferring.borrow_mut().remove(&id);
+        self.transfer_items_left
+            .set(self.transfer_items_left.get().saturating_sub(1));
         let TransferOutcome::Done(pairs) = outcome else {
             return;
         };
@@ -1537,6 +1565,8 @@ impl AppState {
         first_failure: Option<String>,
         rollback_failures: Vec<String>,
     ) {
+        self.batches_active
+            .set(self.batches_active.get().saturating_sub(1));
         let verb = match kind {
             OpKind::Move => "Moved",
             OpKind::Copy => "Copied",
@@ -1586,6 +1616,42 @@ impl AppState {
                     self.show_at(pos.min(n - 1));
                 }
             }
+        }
+    }
+
+    // ---- shutdown --------------------------------------------------------
+
+    /// Window close request. Refused while a move/copy is still running (closing would
+    /// kill its thread mid-item); otherwise saves pending state and lets the close proceed.
+    pub fn close_requested(&self) -> glib::Propagation {
+        if self.batches_active.get() > 0 {
+            let n = self.transfer_items_left.get().max(1);
+            self.toast(&format!(
+                "Finishing {n} transfer{}…",
+                if n == 1 { "" } else { "s" }
+            ));
+            return glib::Propagation::Stop;
+        }
+        self.shutdown();
+        glib::Propagation::Proceed
+    }
+
+    /// Flushes the debounced config save and waits for queued sidecar writes to land.
+    fn shutdown(&self) {
+        let pending_save = self.config_save_source.borrow_mut().take();
+        if let Some(source) = pending_save {
+            source.remove();
+            if let Err(e) = self.config.borrow().save_to(&Config::default_path()) {
+                eprintln!("couldn't save config: {e}");
+            }
+        }
+        // Dropping the only sender ends the writer's loop once its queue is drained.
+        drop(self.xmp_tx.borrow_mut().take());
+        let writer = self.xmp_writer.borrow_mut().take();
+        if let Some(writer) = writer
+            && writer.join().is_err()
+        {
+            eprintln!("XMP writer thread panicked");
         }
     }
 }
