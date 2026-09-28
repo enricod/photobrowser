@@ -457,6 +457,19 @@ impl AppState {
         self.store.extend_from_slice(&objs);
     }
 
+    /// Media paths of the items currently in a move/copy batch.
+    fn transferring_paths(&self) -> HashSet<PathBuf> {
+        let transferring = self.transferring.borrow();
+        let objects = self.objects.borrow();
+        transferring
+            .iter()
+            .filter_map(|id| objects.get(id))
+            .flat_map(|o| {
+                o.with_item(|i| i.files.iter().map(|f| f.path.clone()).collect::<Vec<_>>())
+            })
+            .collect()
+    }
+
     fn remove_object(&self, id: ItemId) {
         let removed = self.objects.borrow_mut().remove(&id);
         if let Some(obj) = removed
@@ -505,12 +518,20 @@ impl AppState {
                 return;
             }
         };
+        // A file being moved away right now is "missing" to the scan, but its row is still
+        // needed: `on_transferred` re-keys it to the destination.
+        let moving = self.transferring_paths();
+        let removed: Vec<PathBuf> = scan
+            .removed
+            .into_iter()
+            .filter(|p| !moving.contains(p))
+            .collect();
         {
             let mut index = self.index.borrow_mut();
             if let Err(e) = index.upsert_many(&scan.upserts) {
                 eprintln!("index update failed: {e}");
             }
-            if let Err(e) = index.remove_paths(&scan.removed) {
+            if let Err(e) = index.remove_paths(&removed) {
                 eprintln!("index cleanup failed: {e}");
             }
         }
@@ -1205,9 +1226,12 @@ impl AppState {
             .borrow()
             .dirty_records(&folder)
             .unwrap_or_default();
+        // A write racing a transfer could recreate a sidecar at a vacated path; the
+        // transfer's own completion re-writes dirty rows at their destination instead.
+        let moving = self.transferring_paths();
         for rec in dirty {
             let in_flight = self.xmp_inflight.borrow().contains_key(&rec.path);
-            if !in_flight {
+            if !in_flight && !moving.contains(&rec.path) {
                 self.write_xmp(rec.path, rec.rating, rec.rejected);
             }
         }
