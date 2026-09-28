@@ -1444,17 +1444,25 @@ impl AppState {
                 self.remove_object(id);
             }
             OpKind::Copy => {
-                let mut index = self.index.borrow_mut();
-                let copies: Vec<FileRecord> = media
-                    .iter()
-                    .filter_map(|(src, dst)| {
-                        let mut rec = index.get(src).ok().flatten()?;
-                        rec.path = dst.clone();
-                        Some(rec)
-                    })
-                    .collect();
-                if let Err(e) = index.upsert_many(&copies) {
-                    eprintln!("index: {e}");
+                let copies: Vec<FileRecord> = {
+                    let mut index = self.index.borrow_mut();
+                    let copies: Vec<FileRecord> = media
+                        .iter()
+                        .filter_map(|(src, dst)| {
+                            let mut rec = index.get(src).ok().flatten()?;
+                            rec.path = dst.clone();
+                            Some(rec)
+                        })
+                        .collect();
+                    if let Err(e) = index.upsert_many(&copies) {
+                        eprintln!("index: {e}");
+                    }
+                    copies
+                };
+                // As for a move: a rating not yet in the source sidecar when it was copied
+                // (a failed or raced write) must still reach the destination sidecar.
+                for rec in copies.into_iter().filter(|r| r.xmp_dirty) {
+                    self.write_xmp(rec.path, rec.rating, rec.rejected);
                 }
             }
         }
