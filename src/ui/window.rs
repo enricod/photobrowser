@@ -2,11 +2,12 @@ use std::cell::Cell;
 use std::path::PathBuf;
 
 use adw::prelude::*;
+use gtk::gio;
 use gtk::glib;
 
 use super::state::{AppState, Widgets};
 use super::viewer::Viewer;
-use super::{filterbar, grid, keys, style};
+use super::{filterbar, grid, keys, prefs, style};
 
 pub fn build(app: &adw::Application, start_folder: Option<PathBuf>) {
     let (tx, rx) = async_channel::unbounded();
@@ -29,6 +30,14 @@ pub fn build(app: &adw::Application, start_folder: Option<PathBuf>) {
     counter.add_css_class("dim-label");
     counter.add_css_class("numeric");
     header.pack_end(&counter);
+    let menu = gio::Menu::new();
+    menu.append(Some("Preferences"), Some("win.preferences"));
+    let menu_button = gtk::MenuButton::builder()
+        .icon_name("open-menu-symbolic")
+        .menu_model(&menu)
+        .tooltip_text("Main Menu")
+        .build();
+    header.pack_end(&menu_button);
     let filters = filterbar::build(&state);
     header.set_title_widget(Some(&filters));
 
@@ -65,6 +74,12 @@ pub fn build(app: &adw::Application, start_folder: Option<PathBuf>) {
     window.set_content(Some(&toolbar));
 
     let _ = state.widgets.set(Widgets { window: window.clone(), toasts, stack, grid, counter, filters, viewer });
+
+    let s = state.clone();
+    let preferences = gio::ActionEntry::builder("preferences")
+        .activate(move |_: &adw::ApplicationWindow, _, _| prefs::show(&s))
+        .build();
+    window.add_action_entries([preferences]);
 
     for button in [&open_button, &empty_button] {
         let s = state.clone();

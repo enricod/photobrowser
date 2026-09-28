@@ -28,6 +28,10 @@ pkg-config = "0.3.34"
 criterion = "0.8.2"
 tempfile = "3.27.0"
 
+[[bench]]
+name = "pipeline"
+harness = false
+
 [profile.dev.package."*"]
 opt-level = 2          # decoders/resizers are unusably slow unoptimised
 

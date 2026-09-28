@@ -102,6 +102,12 @@ pub struct AppState {
     /// Ids currently accepted into a move/copy batch (spawned or waiting on XMP writes to
     /// drain): `rate()` and `start_transfer()` both skip them to avoid racing the transfer.
     transferring: RefCell<HashSet<ItemId>>,
+    monitor: RefCell<Option<gio::FileMonitor>>,
+    rescan_source: RefCell<Option<glib::SourceId>>,
+    /// A rescan came in while one was already running: run once more when it finishes,
+    /// instead of starting a second scan thread that could race the first.
+    rescan_pending: Cell<bool>,
+    scan_running: Cell<bool>,
 }
 
 fn capacity(n: usize) -> NonZeroUsize {
@@ -230,6 +236,10 @@ impl AppState {
             config_save_source: RefCell::new(None),
             viewer_resume: Cell::new(None),
             transferring: RefCell::default(),
+            monitor: RefCell::new(None),
+            rescan_source: RefCell::new(None),
+            rescan_pending: Cell::new(false),
+            scan_running: Cell::new(false),
         })
     }
 
@@ -320,7 +330,8 @@ impl AppState {
         }
         self.add_objects(items);
         self.widgets().stack.set_visible_child_name("grid");
-        self.start_scan(folder, known);
+        self.start_scan(folder.clone(), known);
+        self.watch_folder(&folder);
     }
 
     /// Forgets the current folder: cancels queued work, clears models and caches.
@@ -351,6 +362,14 @@ impl AppState {
         // Their ids are never reused, so it's enough to just forget them.
         self.transferring.borrow_mut().clear();
         *self.folder.borrow_mut() = None;
+        if let Some(monitor) = self.monitor.borrow_mut().take() {
+            monitor.cancel();
+        }
+        if let Some(source) = self.rescan_source.borrow_mut().take() {
+            source.remove();
+        }
+        self.rescan_pending.set(false);
+        self.scan_running.set(false);
     }
 
     pub fn folder_lost(self: &Rc<Self>, message: &str) {
@@ -383,6 +402,7 @@ impl AppState {
     }
 
     fn start_scan(&self, folder: PathBuf, known: HashMap<PathBuf, FileRecord>) {
+        self.scan_running.set(true);
         let tx = self.tx.clone();
         let generation = self.generation.get();
         std::thread::Builder::new()
@@ -394,7 +414,13 @@ impl AppState {
             .expect("failed to spawn scan thread");
     }
 
+    /// Never overlaps a scan already in flight: if one is running, just remembers to run
+    /// again once it finishes (see `on_scanned`) instead of spawning a second scan thread.
     pub fn rescan(&self) {
+        if self.scan_running.get() {
+            self.rescan_pending.set(true);
+            return;
+        }
         let Some(folder) = self.folder() else { return };
         let known = self.index.borrow().load_folder(&folder).unwrap_or_default();
         self.start_scan(folder, known);
@@ -404,6 +430,7 @@ impl AppState {
         if generation != self.generation.get() {
             return;
         }
+        self.scan_running.set(false);
         let scan = match result {
             Ok(scan) => scan,
             Err(e) => {
@@ -411,6 +438,9 @@ impl AppState {
                 return;
             }
         };
+        if self.rescan_pending.replace(false) {
+            self.rescan();
+        }
         {
             let mut index = self.index.borrow_mut();
             if let Err(e) = index.upsert_many(&scan.upserts) {
@@ -462,6 +492,44 @@ impl AppState {
         self.resort();
         self.warm_disk_cache(warm);
         self.flush_dirty_xmp();
+    }
+
+    // ---- folder monitoring -----------------------------------------------
+
+    fn watch_folder(self: &Rc<Self>, folder: &std::path::Path) {
+        let dir = gio::File::for_path(folder);
+        let monitor = match dir.monitor_directory(gio::FileMonitorFlags::WATCH_MOVES, gio::Cancellable::NONE) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("cannot watch {}: {e}", folder.display());
+                return;
+            }
+        };
+        let s = self.clone();
+        monitor.connect_changed(move |_, changed, _, event| {
+            let is_dir_itself = changed.equal(&dir);
+            match event {
+                gio::FileMonitorEvent::Deleted | gio::FileMonitorEvent::MovedOut if is_dir_itself => {
+                    s.folder_lost("The folder was removed");
+                }
+                gio::FileMonitorEvent::Unmounted => s.folder_lost("The folder's drive was unmounted"),
+                _ => s.schedule_rescan(),
+            }
+        });
+        *self.monitor.borrow_mut() = Some(monitor);
+    }
+
+    /// Coalesces bursts of file events (a card copy, our own sidecar writes) into one rescan.
+    fn schedule_rescan(self: &Rc<Self>) {
+        if let Some(source) = self.rescan_source.borrow_mut().take() {
+            source.remove();
+        }
+        let s = self.clone();
+        let source = glib::timeout_add_local_once(Duration::from_millis(250), move || {
+            s.rescan_source.borrow_mut().take();
+            s.rescan();
+        });
+        *self.rescan_source.borrow_mut() = Some(source);
     }
 
     // ---- thumbnails ----------------------------------------------------------
