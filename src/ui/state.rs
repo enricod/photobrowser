@@ -106,7 +106,10 @@ pub struct AppState {
     pending_thumbs: RefCell<HashMap<ItemId, (u64, CancelToken)>>,
     next_thumb_serial: Cell<u64>,
     thumb_lru: RefCell<LruCache<ItemId, ()>>,
-    full_cache: RefCell<LruCache<(ItemId, Zoom), gdk::Texture>>,
+    /// Fit-to-screen decodes (current image plus prefetched neighbours).
+    full_cache: RefCell<LruCache<ItemId, gdk::Texture>>,
+    /// 100 % decodes: kept for the current and previous image only (spec §5.3).
+    actual_cache: RefCell<LruCache<ItemId, gdk::Texture>>,
     /// In-flight full-size decodes: the priority they were queued at and their cancel token.
     pending_full: RefCell<HashMap<(ItemId, Zoom), (Priority, CancelToken)>>,
     exif_cache: RefCell<HashMap<ItemId, ExifInfo>>,
@@ -132,6 +135,9 @@ pub struct AppState {
     rescan_pending: Cell<bool>,
     scan_running: Cell<bool>,
 }
+
+/// 100 % textures kept in memory: the current and the previous image.
+const ACTUAL_CACHE_ITEMS: usize = 2;
 
 fn capacity(n: usize) -> NonZeroUsize {
     NonZeroUsize::new(n.max(1)).unwrap()
@@ -232,8 +238,7 @@ impl AppState {
         let sorted = gtk::SortListModel::new(Some(filtered), Some(sorter.clone()));
         let selection = gtk::MultiSelection::new(Some(sorted));
         let thumb_cap = config.thumb_cache_items;
-        // +2 leaves room for 100 % decodes of the current and previous image.
-        let full_cap = config.full_cache_items + 2;
+        let full_cap = config.full_cache_items;
         let xmp_tx = spawn_xmp_writer(tx.clone());
 
         Rc::new(AppState {
@@ -255,6 +260,7 @@ impl AppState {
             next_thumb_serial: Cell::new(0),
             thumb_lru: RefCell::new(LruCache::new(capacity(thumb_cap))),
             full_cache: RefCell::new(LruCache::new(capacity(full_cap))),
+            actual_cache: RefCell::new(LruCache::new(capacity(ACTUAL_CACHE_ITEMS))),
             pending_full: RefCell::default(),
             exif_cache: RefCell::default(),
             folder: RefCell::new(None),
@@ -406,6 +412,7 @@ impl AppState {
         self.store.remove_all();
         self.thumb_lru.borrow_mut().clear();
         self.full_cache.borrow_mut().clear();
+        self.actual_cache.borrow_mut().clear();
         for (_, (_, token)) in self.pending_full.borrow_mut().drain() {
             token.cancel();
         }
@@ -883,11 +890,7 @@ impl AppState {
                 keep
             });
 
-        let cached = self
-            .full_cache
-            .borrow_mut()
-            .get(&(obj.id(), Zoom::Fit))
-            .cloned();
+        let cached = self.cached_full(obj.id(), Zoom::Fit);
         match cached {
             Some(texture) => viewer.set_texture(&texture),
             None => {
@@ -951,7 +954,7 @@ impl AppState {
             Zoom::Actual => Zoom::Fit,
         };
         viewer.set_zoom(zoom);
-        let cached = self.full_cache.borrow_mut().get(&(obj.id(), zoom)).cloned();
+        let cached = self.cached_full(obj.id(), zoom);
         match cached {
             Some(texture) => viewer.set_texture(&texture),
             None => self.request_full(&obj, zoom, Priority::Current),
@@ -979,9 +982,21 @@ impl AppState {
         }
     }
 
+    fn cache_for(&self, zoom: Zoom) -> &RefCell<LruCache<ItemId, gdk::Texture>> {
+        match zoom {
+            Zoom::Fit => &self.full_cache,
+            Zoom::Actual => &self.actual_cache,
+        }
+    }
+
+    /// Cached texture for `id` at `zoom`, marked most recently used.
+    fn cached_full(&self, id: ItemId, zoom: Zoom) -> Option<gdk::Texture> {
+        self.cache_for(zoom).borrow_mut().get(&id).cloned()
+    }
+
     pub fn request_full(&self, obj: &ItemObject, zoom: Zoom, priority: Priority) {
         let key = (obj.id(), zoom);
-        if self.full_cache.borrow().contains(&key) {
+        if self.cache_for(zoom).borrow().contains(&obj.id()) {
             return;
         }
         if let Some((queued_at, token)) = self.pending_full.borrow().get(&key) {
@@ -1027,9 +1042,7 @@ impl AppState {
         match result {
             Ok(img) => {
                 let texture = texture_from(img);
-                self.full_cache
-                    .borrow_mut()
-                    .push((id, zoom), texture.clone());
+                self.cache_for(zoom).borrow_mut().push(id, texture.clone());
                 if is_current && viewer.zoom() == zoom {
                     viewer.set_texture(&texture);
                 }
