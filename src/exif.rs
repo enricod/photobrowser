@@ -46,6 +46,27 @@ pub fn save(meta: &rexiv2::Metadata, path: &Path) -> Result<(), rexiv2::Rexiv2Er
     meta.save_to_file(path)
 }
 
+/// Data of the largest embedded JPEG preview whose long edge is at least `needed` px.
+/// Always use this (not `Metadata::get_preview_images`): preview enumeration reads
+/// through exiv2, so it holds the shared side of the lock like `open_path`.
+pub fn largest_jpeg_preview(meta: &rexiv2::Metadata, needed: u32) -> Option<Vec<u8>> {
+    init();
+    let _shared = EXIV2_LOCK.read().unwrap_or_else(PoisonError::into_inner);
+    let previews = meta.get_preview_images()?;
+    let best = previews
+        .into_iter()
+        .filter(|p| {
+            p.get_extension()
+                .map(|e| e.trim_start_matches('.').eq_ignore_ascii_case("jpg"))
+                .unwrap_or(false)
+        })
+        .max_by_key(|p| p.get_width() as u64 * p.get_height() as u64)?;
+    if best.get_width().max(best.get_height()) < needed {
+        return None;
+    }
+    best.get_data().ok()
+}
+
 /// Parses EXIF "YYYY:MM:DD HH:MM:SS" as a naive timestamp (treated as UTC; used only for sorting).
 pub fn parse_exif_datetime(s: &str) -> Option<i64> {
     let s = s.trim().trim_end_matches('\0');
@@ -199,5 +220,48 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(info.summary(), "Canon EOS R6 · 1/250 s · f/4 · ISO 400");
+    }
+
+    /// Every exiv2 entry point that parses, encodes or reads previews must go through the
+    /// wrappers in this file (they hold `EXIV2_LOCK`).
+    #[test]
+    fn exiv2_access_only_through_wrappers() {
+        const FORBIDDEN: [&str; 4] = [
+            "new_from_path",
+            "new_from_buffer",
+            "save_to_file",
+            "get_preview_images",
+        ];
+        fn walk(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut files = Vec::new();
+        for dir in ["src", "tests", "benches"] {
+            if root.join(dir).is_dir() {
+                walk(&root.join(dir), &mut files);
+            }
+        }
+        let exif_rs = root.join("src/exif.rs");
+        let offenders: Vec<String> = files
+            .iter()
+            .filter(|f| **f != exif_rs)
+            .flat_map(|f| {
+                let text = std::fs::read_to_string(f).unwrap();
+                FORBIDDEN
+                    .iter()
+                    .filter(|pat| text.contains(**pat))
+                    .map(|pat| format!("{}: {pat}", f.display()))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert!(offenders.is_empty(), "direct exiv2 access: {offenders:?}");
     }
 }

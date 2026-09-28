@@ -20,7 +20,7 @@ pub fn decode_raw_preview(path: &Path, target_edge: u32) -> Result<(Rgba, u8), D
     let needed = needed_edge(target_edge);
 
     if let Ok(meta) = exif::open_path(path)
-        && let Some(data) = largest_exiv2_preview(&meta, needed)
+        && let Some(data) = exif::largest_jpeg_preview(&meta, needed)
         && let Ok(img) = jpeg::decode_jpeg(&data, target_edge)
     {
         return Ok((img, exif::orientation(&meta)));
@@ -35,22 +35,6 @@ pub fn decode_raw_preview(path: &Path, target_edge: u32) -> Result<(Rgba, u8), D
         }
     }
     Ok((raw.decode(true)?, 1))
-}
-
-fn largest_exiv2_preview(meta: &rexiv2::Metadata, needed: u32) -> Option<Vec<u8>> {
-    let previews = meta.get_preview_images()?;
-    let best = previews
-        .into_iter()
-        .filter(|p| {
-            p.get_extension()
-                .map(|e| e.trim_start_matches('.').eq_ignore_ascii_case("jpg"))
-                .unwrap_or(false)
-        })
-        .max_by_key(|p| p.get_width() as u64 * p.get_height() as u64)?;
-    if best.get_width().max(best.get_height()) < needed {
-        return None;
-    }
-    best.get_data().ok()
 }
 
 /// Full-resolution demosaic (slow: 0.5–2 s). Upright.
