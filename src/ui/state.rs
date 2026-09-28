@@ -498,9 +498,6 @@ impl AppState {
                 return;
             }
         };
-        if self.rescan_pending.replace(false) {
-            self.rescan();
-        }
         {
             let mut index = self.index.borrow_mut();
             if let Err(e) = index.upsert_many(&scan.upserts) {
@@ -567,6 +564,13 @@ impl AppState {
         self.resort();
         self.warm_disk_cache(warm);
         self.flush_dirty_xmp();
+        // Only now, after this scan's index writes and diff have been applied, is it safe
+        // to let a rescan requested mid-scan run: it must see this scan's own results (via
+        // the index) rather than a stale snapshot, or it would redo this scan's work and
+        // could clobber a rating set on a newly-appeared file in the meantime.
+        if self.rescan_pending.replace(false) {
+            self.rescan();
+        }
     }
 
     // ---- folder monitoring -----------------------------------------------

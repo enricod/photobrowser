@@ -41,12 +41,18 @@ pub fn show(state: &Rc<AppState>) {
 
     let s = state.clone();
     dialog.connect_closed(move |_| {
-        let mut c = s.config.borrow_mut();
-        c.auto_advance = advance.is_active();
-        c.thumb_cache_items = thumbs.value() as usize;
-        c.full_cache_items = fulls.value() as usize;
-        c.disk_cache_mb = disk.value() as u64;
-        let _ = c.save_to(&Config::default_path());
+        let result = {
+            let mut c = s.config.borrow_mut();
+            c.auto_advance = advance.is_active();
+            c.thumb_cache_items = thumbs.value() as usize;
+            c.full_cache_items = fulls.value() as usize;
+            c.disk_cache_mb = disk.value() as u64;
+            c.save_to(&Config::default_path())
+        };
+        if let Err(e) = result {
+            eprintln!("couldn't save preferences: {e}");
+            s.toast(&format!("Couldn't save preferences: {e}"));
+        }
     });
     dialog.present(Some(&state.widgets().window));
 }
