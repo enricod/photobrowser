@@ -4,6 +4,7 @@ pub mod item_object;
 pub mod keys;
 pub mod state;
 pub mod style;
+pub mod viewer;
 pub mod window;
 
 use std::path::PathBuf;

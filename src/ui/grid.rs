@@ -86,5 +86,7 @@ pub fn build(state: &Rc<AppState>) -> gtk::GridView {
     let grid = gtk::GridView::new(Some(state.selection.clone()), Some(thumb_factory(state, false)));
     grid.set_max_columns(64);
     grid.set_enable_rubberband(true);
+    let s = state.clone();
+    grid.connect_activate(move |_, pos| s.open_viewer(pos));
     grid
 }

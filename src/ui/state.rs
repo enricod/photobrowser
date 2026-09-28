@@ -1,5 +1,5 @@
 use std::cell::{Cell, OnceCell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -12,10 +12,12 @@ use gtk::{gdk, gio, glib};
 use lru::LruCache;
 
 use super::item_object::ItemObject;
+use super::viewer::{info_text, Viewer};
 use crate::catalog::diff::diff_items;
 use crate::catalog::rating::{self, RatingChange};
 use crate::catalog::sync::{self, ScanResult};
 use crate::config::Config;
+use crate::exif::{self, ExifInfo};
 use crate::decode::{self, Quality, Rgba, THUMB_EDGE};
 use crate::filter::{self, FilterState, SortState};
 use crate::index::{FileRecord, Index};
@@ -24,12 +26,20 @@ use crate::media::{Item, ItemId, MediaFile};
 use crate::thumbcache::DiskCache;
 use crate::xmp;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Zoom {
+    Fit,
+    Actual,
+}
+
 /// Results sent from worker threads to the GTK main thread.
 pub enum Msg {
     /// `serial` identifies the request; a result whose serial is no longer pending is stale.
     Thumb { id: ItemId, generation: u64, serial: u64, result: Result<Rgba, String> },
     Scanned { generation: u64, result: Result<ScanResult, String> },
     XmpWritten { path: PathBuf, result: Result<i64, String> },
+    Full { id: ItemId, generation: u64, zoom: Zoom, result: Result<Rgba, String> },
+    Exif { id: ItemId, info: ExifInfo },
 }
 
 pub struct Widgets {
@@ -39,6 +49,7 @@ pub struct Widgets {
     pub grid: gtk::GridView,
     pub counter: gtk::Label,
     pub filters: gtk::Box,
+    pub viewer: Rc<Viewer>,
 }
 
 pub struct AppState {
@@ -61,6 +72,9 @@ pub struct AppState {
     pending_thumbs: RefCell<HashMap<ItemId, (u64, CancelToken)>>,
     next_thumb_serial: Cell<u64>,
     thumb_lru: RefCell<LruCache<ItemId, ()>>,
+    full_cache: RefCell<LruCache<(ItemId, Zoom), gdk::Texture>>,
+    pending_full: RefCell<HashSet<(ItemId, Zoom)>>,
+    exif_cache: RefCell<HashMap<ItemId, ExifInfo>>,
     folder: RefCell<Option<PathBuf>>,
     /// Bumped on every folder change; results from older generations are dropped.
     generation: Cell<u64>,
@@ -144,6 +158,8 @@ impl AppState {
         let sorted = gtk::SortListModel::new(Some(filtered), Some(sorter.clone()));
         let selection = gtk::MultiSelection::new(Some(sorted));
         let thumb_cap = config.thumb_cache_items;
+        // +2 leaves room for 100 % decodes of the current and previous image.
+        let full_cap = config.full_cache_items + 2;
         let xmp_tx = spawn_xmp_writer(tx.clone());
 
         Rc::new(AppState {
@@ -164,6 +180,9 @@ impl AppState {
             pending_thumbs: RefCell::default(),
             next_thumb_serial: Cell::new(0),
             thumb_lru: RefCell::new(LruCache::new(capacity(thumb_cap))),
+            full_cache: RefCell::new(LruCache::new(capacity(full_cap))),
+            pending_full: RefCell::default(),
+            exif_cache: RefCell::default(),
             folder: RefCell::new(None),
             generation: Cell::new(0),
             next_id: Cell::new(0),
@@ -217,6 +236,8 @@ impl AppState {
             Msg::Thumb { id, generation, serial, result } => self.on_thumb(id, generation, serial, result),
             Msg::Scanned { generation, result } => self.on_scanned(generation, result),
             Msg::XmpWritten { path, result } => self.on_xmp_written(path, result),
+            Msg::Full { id, generation, zoom, result } => self.on_full(id, generation, zoom, result),
+            Msg::Exif { id, info } => self.on_exif(id, info),
         }
     }
 
@@ -270,6 +291,14 @@ impl AppState {
         // Empty the model first: its cells unbind (and touch the LRU) while items still exist.
         self.store.remove_all();
         self.thumb_lru.borrow_mut().clear();
+        self.full_cache.borrow_mut().clear();
+        self.pending_full.borrow_mut().clear();
+        self.exif_cache.borrow_mut().clear();
+        if let Some(w) = self.widgets.get()
+            && w.stack.visible_child_name().as_deref() == Some("viewer")
+        {
+            w.stack.set_visible_child_name("grid");
+        }
         self.objects.borrow_mut().clear();
         self.filter_state.borrow_mut().pinned.clear();
         *self.folder.borrow_mut() = None;
@@ -572,6 +601,181 @@ impl AppState {
         *self.config_save_source.borrow_mut() = Some(id);
     }
 
+    // ---- viewer --------------------------------------------------------------
+
+    pub fn viewer_active(&self) -> bool {
+        self.widgets().stack.visible_child_name().as_deref() == Some("viewer")
+    }
+
+    pub fn current_position(&self) -> Option<u32> {
+        let set = self.selection.selection();
+        (!set.is_empty()).then(|| set.minimum())
+    }
+
+    pub fn open_viewer(self: &Rc<Self>, pos: u32) {
+        self.widgets().stack.set_visible_child_name("viewer");
+        self.show_at(pos);
+    }
+
+    pub fn close_viewer(&self) {
+        let w = self.widgets();
+        w.stack.set_visible_child_name("grid");
+        if let Some(pos) = self.current_position() {
+            w.grid.scroll_to(pos, gtk::ListScrollFlags::FOCUS | gtk::ListScrollFlags::SELECT, None);
+        }
+    }
+
+    pub fn show_at(self: &Rc<Self>, pos: u32) {
+        let Some(obj) = self.selection.item(pos).and_downcast::<ItemObject>() else { return };
+        self.selection.select_item(pos, true);
+        let viewer = self.widgets().viewer.clone();
+        let text = self.info_for(&obj);
+        viewer.set_current(&obj, &text);
+
+        let cached = self.full_cache.borrow_mut().get(&(obj.id(), Zoom::Fit)).cloned();
+        match cached {
+            Some(texture) => viewer.set_texture(&texture),
+            None => {
+                if let Some(thumb) = obj.thumbnail() {
+                    viewer.set_texture(&thumb); // instant low-res placeholder
+                }
+                self.request_full(&obj, Zoom::Fit, Priority::Current);
+            }
+        }
+        self.request_thumb(&obj, Priority::Current);
+        if viewer.info_visible() {
+            self.request_exif(&obj);
+        }
+        let n = self.selection.n_items() as i64;
+        for delta in [1i64, -1, 2, -2] {
+            let p = pos as i64 + delta;
+            if (0..n).contains(&p)
+                && let Some(o) = self.selection.item(p as u32).and_downcast::<ItemObject>()
+            {
+                self.request_full(&o, Zoom::Fit, Priority::Prefetch);
+            }
+        }
+    }
+
+    pub fn step(self: &Rc<Self>, delta: i64) {
+        let Some(cur) = self.current_position() else { return };
+        let n = self.selection.n_items() as i64;
+        if n == 0 {
+            return;
+        }
+        let next = (cur as i64 + delta).clamp(0, n - 1);
+        if next != cur as i64 {
+            self.show_at(next as u32);
+        }
+    }
+
+    pub fn toggle_zoom(self: &Rc<Self>) {
+        let viewer = self.widgets().viewer.clone();
+        let Some(obj) = viewer.current() else { return };
+        let zoom = match viewer.zoom() {
+            Zoom::Fit => Zoom::Actual,
+            Zoom::Actual => Zoom::Fit,
+        };
+        viewer.set_zoom(zoom);
+        let cached = self.full_cache.borrow_mut().get(&(obj.id(), zoom)).cloned();
+        match cached {
+            Some(texture) => viewer.set_texture(&texture),
+            None => self.request_full(&obj, zoom, Priority::Current),
+        }
+    }
+
+    pub fn toggle_info(self: &Rc<Self>) {
+        let viewer = self.widgets().viewer.clone();
+        if viewer.toggle_info()
+            && let Some(obj) = viewer.current()
+        {
+            self.request_exif(&obj);
+        }
+    }
+
+    fn info_for(&self, obj: &ItemObject) -> String {
+        let exif = self.exif_cache.borrow().get(&obj.id()).cloned();
+        obj.with_item(|item| info_text(item, exif.as_ref()))
+    }
+
+    fn refresh_info(&self) {
+        let viewer = &self.widgets().viewer;
+        if let Some(obj) = viewer.current() {
+            viewer.set_info(&self.info_for(&obj));
+        }
+    }
+
+    pub fn request_full(&self, obj: &ItemObject, zoom: Zoom, priority: Priority) {
+        let key = (obj.id(), zoom);
+        if self.full_cache.borrow().contains(&key) || self.pending_full.borrow().contains(&key) {
+            return;
+        }
+        self.pending_full.borrow_mut().insert(key);
+        let item = obj.item();
+        let edge = self.screen_edge();
+        let (tx, generation) = (self.tx.clone(), self.generation.get());
+        self.pool.submit(priority, CancelToken::new(), move || {
+            let result = decode::guarded(|| match zoom {
+                Zoom::Fit => decode::decode_for_display(item.display_file(), edge, Quality::High),
+                Zoom::Actual => decode::decode_actual_size(&item),
+            })
+            .map_err(|e| e.to_string());
+            let _ = tx.send_blocking(Msg::Full { id: item.id, generation, zoom, result });
+        });
+    }
+
+    fn on_full(&self, id: ItemId, generation: u64, zoom: Zoom, result: Result<Rgba, String>) {
+        self.pending_full.borrow_mut().remove(&(id, zoom));
+        if generation != self.generation.get() {
+            return;
+        }
+        let viewer = self.widgets().viewer.clone();
+        let is_current = viewer.current_id() == Some(id);
+        match result {
+            Ok(img) => {
+                let texture = texture_from(img);
+                self.full_cache.borrow_mut().push((id, zoom), texture.clone());
+                if is_current && viewer.zoom() == zoom {
+                    viewer.set_texture(&texture);
+                }
+            }
+            Err(e) if is_current => self.toast(&format!("Couldn't open image: {e}")),
+            Err(_) => {}
+        }
+    }
+
+    fn request_exif(&self, obj: &ItemObject) {
+        if self.exif_cache.borrow().contains_key(&obj.id()) {
+            return;
+        }
+        let (id, path) = obj.with_item(|i| (i.id, i.raw_file().unwrap_or(i.display_file()).path.clone()));
+        let tx = self.tx.clone();
+        self.pool.submit(Priority::Visible, CancelToken::new(), move || {
+            let _ = tx.send_blocking(Msg::Exif { id, info: exif::read_info(&path) });
+        });
+    }
+
+    fn on_exif(&self, id: ItemId, info: ExifInfo) {
+        self.exif_cache.borrow_mut().insert(id, info);
+        if self.widgets().viewer.current_id() == Some(id) {
+            self.refresh_info();
+        }
+    }
+
+    /// Long edge of the monitor in device pixels (full view decode size).
+    fn screen_edge(&self) -> u32 {
+        let window = &self.widgets().window;
+        let display = gtk::prelude::WidgetExt::display(window);
+        window
+            .surface()
+            .and_then(|surface| display.monitor_at_surface(&surface))
+            .map(|m| {
+                let g = m.geometry();
+                (g.width().max(g.height()) * m.scale_factor()) as u32
+            })
+            .unwrap_or(2560)
+    }
+
     // ---- rating --------------------------------------------------------------
 
     pub fn selected_objects(&self) -> Vec<ItemObject> {
@@ -584,6 +788,9 @@ impl AppState {
 
     /// What a rating/move/copy shortcut applies to.
     pub fn rating_targets(&self) -> Vec<ItemObject> {
+        if self.viewer_active() {
+            return self.widgets().viewer.current().into_iter().collect();
+        }
         self.selected_objects()
     }
 
@@ -604,6 +811,12 @@ impl AppState {
                     eprintln!("index: {e}");
                 }
                 self.write_xmp(file.path.clone(), item.rating, item.rejected);
+            }
+        }
+        if self.viewer_active() {
+            self.refresh_info();
+            if self.config.borrow().auto_advance {
+                self.step(1);
             }
         }
     }

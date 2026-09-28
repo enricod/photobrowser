@@ -5,6 +5,7 @@ use adw::prelude::*;
 use gtk::glib;
 
 use super::state::{AppState, Widgets};
+use super::viewer::Viewer;
 use super::{filterbar, grid, keys, style};
 
 pub fn build(app: &adw::Application, start_folder: Option<PathBuf>) {
@@ -54,6 +55,8 @@ pub fn build(app: &adw::Application, start_folder: Option<PathBuf>) {
     let stack = gtk::Stack::new();
     stack.add_named(&empty, Some("empty"));
     stack.add_named(&grid_scroller, Some("grid"));
+    let viewer = Viewer::new(&state);
+    stack.add_named(&viewer.root, Some("viewer"));
     let toasts = adw::ToastOverlay::new();
     toasts.set_child(Some(&stack));
     let toolbar = adw::ToolbarView::new();
@@ -61,7 +64,7 @@ pub fn build(app: &adw::Application, start_folder: Option<PathBuf>) {
     toolbar.set_content(Some(&toasts));
     window.set_content(Some(&toolbar));
 
-    let _ = state.widgets.set(Widgets { window: window.clone(), toasts, stack, grid, counter, filters });
+    let _ = state.widgets.set(Widgets { window: window.clone(), toasts, stack, grid, counter, filters, viewer });
 
     for button in [&open_button, &empty_button] {
         let s = state.clone();
