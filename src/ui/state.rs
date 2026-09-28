@@ -1,5 +1,5 @@
 use std::cell::{Cell, OnceCell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -73,7 +73,8 @@ pub struct AppState {
     next_thumb_serial: Cell<u64>,
     thumb_lru: RefCell<LruCache<ItemId, ()>>,
     full_cache: RefCell<LruCache<(ItemId, Zoom), gdk::Texture>>,
-    pending_full: RefCell<HashSet<(ItemId, Zoom)>>,
+    /// In-flight full-size decodes: the priority they were queued at and their cancel token.
+    pending_full: RefCell<HashMap<(ItemId, Zoom), (Priority, CancelToken)>>,
     exif_cache: RefCell<HashMap<ItemId, ExifInfo>>,
     folder: RefCell<Option<PathBuf>>,
     /// Bumped on every folder change; results from older generations are dropped.
@@ -292,7 +293,9 @@ impl AppState {
         self.store.remove_all();
         self.thumb_lru.borrow_mut().clear();
         self.full_cache.borrow_mut().clear();
-        self.pending_full.borrow_mut().clear();
+        for (_, (_, token)) in self.pending_full.borrow_mut().drain() {
+            token.cancel();
+        }
         self.exif_cache.borrow_mut().clear();
         if let Some(w) = self.widgets.get()
             && w.stack.visible_child_name().as_deref() == Some("viewer")
@@ -607,7 +610,20 @@ impl AppState {
         self.widgets().stack.visible_child_name().as_deref() == Some("viewer")
     }
 
+    /// Position of the viewed item while the viewer is open (falling back to the first
+    /// selected item if it left the model); otherwise the first selected item.
     pub fn current_position(&self) -> Option<u32> {
+        if self.viewer_active()
+            && let Some(id) = self.widgets().viewer.current_id()
+            && let Some(pos) = (0..self.selection.n_items()).find(|&i| {
+                self.selection
+                    .item(i)
+                    .and_downcast::<ItemObject>()
+                    .is_some_and(|o| o.id() == id)
+            })
+        {
+            return Some(pos);
+        }
         let set = self.selection.selection();
         (!set.is_empty()).then(|| set.minimum())
     }
@@ -619,18 +635,35 @@ impl AppState {
 
     pub fn close_viewer(&self) {
         let w = self.widgets();
+        let pos = self.current_position(); // while still active: the viewed item
         w.stack.set_visible_child_name("grid");
-        if let Some(pos) = self.current_position() {
+        if let Some(pos) = pos {
             w.grid.scroll_to(pos, gtk::ListScrollFlags::FOCUS | gtk::ListScrollFlags::SELECT, None);
         }
     }
 
     pub fn show_at(self: &Rc<Self>, pos: u32) {
         let Some(obj) = self.selection.item(pos).and_downcast::<ItemObject>() else { return };
-        self.selection.select_item(pos, true);
         let viewer = self.widgets().viewer.clone();
         let text = self.info_for(&obj);
+        // Set before selecting, so `follow_selection` sees the selection already matching.
         viewer.set_current(&obj, &text);
+        self.selection.select_item(pos, true);
+
+        // Drop queued decodes for items that left the current ±2 window.
+        let n = self.selection.n_items() as i64;
+        let window: Vec<ItemId> = (pos as i64 - 2..=pos as i64 + 2)
+            .filter(|p| (0..n).contains(p))
+            .filter_map(|p| self.selection.item(p as u32).and_downcast::<ItemObject>())
+            .map(|o| o.id())
+            .collect();
+        self.pending_full.borrow_mut().retain(|(id, _), (_, token)| {
+            let keep = window.contains(id);
+            if !keep {
+                token.cancel();
+            }
+            keep
+        });
 
         let cached = self.full_cache.borrow_mut().get(&(obj.id(), Zoom::Fit)).cloned();
         match cached {
@@ -646,7 +679,6 @@ impl AppState {
         if viewer.info_visible() {
             self.request_exif(&obj);
         }
-        let n = self.selection.n_items() as i64;
         for delta in [1i64, -1, 2, -2] {
             let p = pos as i64 + delta;
             if (0..n).contains(&p)
@@ -654,6 +686,24 @@ impl AppState {
             {
                 self.request_full(&o, Zoom::Fit, Priority::Prefetch);
             }
+        }
+    }
+
+    /// A click in the filmstrip changes the shared selection: show the newly selected item.
+    pub fn follow_selection(self: &Rc<Self>) {
+        if !self.viewer_active() {
+            return;
+        }
+        let current = self.widgets().viewer.current_id();
+        let set = self.selection.selection();
+        let target = (0..set.size()).map(|i| set.nth(i as u32)).find(|&pos| {
+            self.selection
+                .item(pos)
+                .and_downcast::<ItemObject>()
+                .is_some_and(|o| Some(o.id()) != current)
+        });
+        if let Some(pos) = target {
+            self.show_at(pos);
         }
     }
 
@@ -707,14 +757,22 @@ impl AppState {
 
     pub fn request_full(&self, obj: &ItemObject, zoom: Zoom, priority: Priority) {
         let key = (obj.id(), zoom);
-        if self.full_cache.borrow().contains(&key) || self.pending_full.borrow().contains(&key) {
+        if self.full_cache.borrow().contains(&key) {
             return;
         }
-        self.pending_full.borrow_mut().insert(key);
+        if let Some((queued_at, token)) = self.pending_full.borrow().get(&key) {
+            if *queued_at >= priority {
+                return;
+            }
+            // Queued too low (e.g. a prefetch that is now the current image): requeue higher.
+            token.cancel();
+        }
+        let token = CancelToken::new();
+        self.pending_full.borrow_mut().insert(key, (priority, token.clone()));
         let item = obj.item();
         let edge = self.screen_edge();
         let (tx, generation) = (self.tx.clone(), self.generation.get());
-        self.pool.submit(priority, CancelToken::new(), move || {
+        self.pool.submit(priority, token, move || {
             let result = decode::guarded(|| match zoom {
                 Zoom::Fit => decode::decode_for_display(item.display_file(), edge, Quality::High),
                 Zoom::Actual => decode::decode_actual_size(&item),
@@ -725,7 +783,11 @@ impl AppState {
     }
 
     fn on_full(&self, id: ItemId, generation: u64, zoom: Zoom, result: Result<Rgba, String>) {
-        self.pending_full.borrow_mut().remove(&(id, zoom));
+        // The same decode may still be queued (after a requeue): one result is enough.
+        let pending = self.pending_full.borrow_mut().remove(&(id, zoom));
+        if let Some((_, token)) = pending {
+            token.cancel();
+        }
         if generation != self.generation.get() {
             return;
         }

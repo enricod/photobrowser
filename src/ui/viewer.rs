@@ -55,8 +55,7 @@ impl Viewer {
 
         let strip = gtk::ListView::new(Some(state.selection.clone()), Some(thumb_factory(state, true)));
         strip.set_orientation(gtk::Orientation::Horizontal);
-        strip.set_single_click_activate(true);
-        let strip_scroller = gtk::ScrolledWindow::builder()
+            let strip_scroller = gtk::ScrolledWindow::builder()
             .child(&strip)
             .vscrollbar_policy(gtk::PolicyType::Never)
             .min_content_height(96)

@@ -74,7 +74,10 @@ pub fn build(app: &adw::Application, start_folder: Option<PathBuf>) {
     state.selection.connect_items_changed(move |_, _, _, _| s.update_counter());
 
     let s = state.clone();
-    state.selection.connect_selection_changed(move |_, _, _| s.unpin());
+    state.selection.connect_selection_changed(move |_, _, _| {
+        s.unpin();
+        s.follow_selection();
+    });
 
     let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
     scroll.set_propagation_phase(gtk::PropagationPhase::Capture);
