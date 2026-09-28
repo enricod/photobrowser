@@ -13,6 +13,28 @@ cargo build --release
 ./target/release/photobrowser [FOLDER]
 ```
 
+A `Makefile` wraps the common commands:
+
+| Target | What it does |
+|---|---|
+| `make help` | List targets (also the default when running plain `make`). |
+| `make build` | `cargo build --release`. |
+| `make run [DIR=folder]` | Build, then run `./target/release/photobrowser [DIR]`. |
+| `make test` | `cargo test`. |
+| `make test-raw RAW=folder` | `cargo test` with `PB_RAW_SAMPLES` set, to also exercise RAW decoding. `RAW` is required. |
+| `make check` | `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`. |
+| `make bench [RAW=folder]` | `cargo bench`, including `PB_RAW_SAMPLES` when `RAW` is set. |
+| `make install [PREFIX=dir]` | Build, then install the binary and a desktop entry so the app shows up in GNOME. Default `PREFIX` is `$HOME/.local`. |
+| `make uninstall [PREFIX=dir]` | Remove what `make install` installed. |
+| `make clean` | `cargo clean`. |
+
+`make install` puts the binary at `$(PREFIX)/bin/photobrowser` and the desktop
+entry at `$(PREFIX)/share/applications/io.github.enricod.PhotoBrowser.desktop`
+(default prefix: `~/.local`). `~/.local/bin` is on `PATH` by default on
+Fedora; if it isn't on yours, add it so the desktop entry's `Exec=photobrowser`
+can find the binary. Use `make uninstall` (with the same `PREFIX`, if you
+overrode it) to remove both files again.
+
 ## Keyboard
 
 | Key | Action |
