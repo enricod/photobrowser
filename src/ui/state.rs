@@ -6,6 +6,7 @@ use std::rc::Rc;
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
@@ -19,6 +20,7 @@ use crate::catalog::sync::{self, ScanResult};
 use crate::config::Config;
 use crate::exif::{self, ExifInfo};
 use crate::decode::{self, Quality, Rgba, THUMB_EDGE};
+use crate::fileops::{self, ConflictPolicy, OpKind, TransferOutcome};
 use crate::filter::{self, FilterState, SortState};
 use crate::index::{FileRecord, Index};
 use crate::jobs::{CancelToken, JobPool, Priority};
@@ -40,6 +42,15 @@ pub enum Msg {
     XmpWritten { path: PathBuf, result: Result<i64, String> },
     Full { id: ItemId, generation: u64, zoom: Zoom, result: Result<Rgba, String> },
     Exif { id: ItemId, info: ExifInfo },
+    Transferred { id: ItemId, kind: OpKind, outcome: TransferOutcome },
+    TransfersFinished {
+        kind: OpKind,
+        dest: PathBuf,
+        done: usize,
+        skipped: usize,
+        failed: usize,
+        first_failure: Option<String>,
+    },
 }
 
 pub struct Widgets {
@@ -86,6 +97,8 @@ pub struct AppState {
     xmp_failures: Cell<u32>,
     /// Pending debounced config-file write, if any (see `zoom_thumbs`).
     config_save_source: RefCell<Option<glib::SourceId>>,
+    /// Viewer position to resume at once an in-flight transfer finishes.
+    viewer_resume: Cell<Option<u32>>,
 }
 
 fn capacity(n: usize) -> NonZeroUsize {
@@ -192,6 +205,7 @@ impl AppState {
             xmp_inflight: RefCell::default(),
             xmp_failures: Cell::new(0),
             config_save_source: RefCell::new(None),
+            viewer_resume: Cell::new(None),
         })
     }
 
@@ -239,6 +253,10 @@ impl AppState {
             Msg::XmpWritten { path, result } => self.on_xmp_written(path, result),
             Msg::Full { id, generation, zoom, result } => self.on_full(id, generation, zoom, result),
             Msg::Exif { id, info } => self.on_exif(id, info),
+            Msg::Transferred { id, kind, outcome } => self.on_transferred(id, kind, outcome),
+            Msg::TransfersFinished { kind, dest, done, skipped, failed, first_failure } => {
+                self.on_transfers_finished(kind, &dest, done, skipped, failed, first_failure)
+            }
         }
     }
 
@@ -933,6 +951,199 @@ impl AppState {
             let in_flight = self.xmp_inflight.borrow().contains_key(&rec.path);
             if !in_flight {
                 self.write_xmp(rec.path, rec.rating, rec.rejected);
+            }
+        }
+    }
+
+    // ---- move / copy -----------------------------------------------------
+
+    pub fn move_to_last(self: &Rc<Self>) {
+        let last = self
+            .index
+            .borrow()
+            .recent_destinations()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|d| d.is_dir() && Some(d) != self.folder().as_ref());
+        match last {
+            Some(dest) => {
+                let targets = self.rating_targets();
+                if targets.is_empty() {
+                    self.toast("Select one or more images first");
+                } else {
+                    self.start_transfer(targets, dest, OpKind::Move);
+                }
+            }
+            None => super::dialogs::choose_destination(self, OpKind::Move),
+        }
+    }
+
+    pub fn start_transfer(self: &Rc<Self>, targets: Vec<ItemObject>, dest: PathBuf, kind: OpKind) {
+        let jobs: Vec<(ItemId, Vec<PathBuf>)> = targets
+            .iter()
+            .map(|o| o.with_item(|i| (i.id, i.files.iter().map(|f| f.path.clone()).collect())))
+            .collect();
+        let conflicts = jobs.iter().filter(|(_, src)| fileops::has_conflict(src, &dest)).count();
+        if conflicts == 0 {
+            self.run_transfer(jobs, dest, kind, ConflictPolicy::Skip);
+            return;
+        }
+        let body = format!(
+            "{conflicts} of {} item{} already exist in “{}”.",
+            jobs.len(),
+            if jobs.len() == 1 { "" } else { "s" },
+            dest.display()
+        );
+        let dialog = adw::AlertDialog::new(Some("Files Already Exist"), Some(&body));
+        dialog.add_responses(&[("cancel", "_Cancel"), ("skip", "_Skip Existing"), ("rename", "_Keep Both")]);
+        dialog.set_response_appearance("rename", adw::ResponseAppearance::Suggested);
+        dialog.set_default_response(Some("rename"));
+        dialog.set_close_response("cancel");
+        let s = self.clone();
+        dialog.connect_response(None, move |_, response| {
+            let policy = match response {
+                "skip" => ConflictPolicy::Skip,
+                "rename" => ConflictPolicy::Rename,
+                _ => return,
+            };
+            s.run_transfer(jobs.clone(), dest.clone(), kind, policy);
+        });
+        dialog.present(Some(&self.widgets().window));
+    }
+
+    fn run_transfer(
+        self: &Rc<Self>,
+        jobs: Vec<(ItemId, Vec<PathBuf>)>,
+        dest: PathBuf,
+        kind: OpKind,
+        policy: ConflictPolicy,
+    ) {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+        let _ = self.index.borrow().add_recent_destination(&dest, now);
+        self.viewer_resume
+            .set(if self.viewer_active() { self.current_position() } else { None });
+        let verb = match kind {
+            OpKind::Move => "Moving",
+            OpKind::Copy => "Copying",
+        };
+        self.toast(&format!("{verb} {} item{}…", jobs.len(), if jobs.len() == 1 { "" } else { "s" }));
+        let tx = self.tx.clone();
+        std::thread::Builder::new()
+            .name("pb-fileops".into())
+            .spawn(move || {
+                let (mut done, mut skipped, mut failed) = (0, 0, 0);
+                let mut first_failure: Option<String> = None;
+                for (id, sources) in jobs {
+                    let outcome = fileops::transfer_item(&sources, &dest, kind, policy);
+                    match &outcome {
+                        TransferOutcome::Done(_) => done += 1,
+                        TransferOutcome::Skipped => skipped += 1,
+                        TransferOutcome::Failed(e) => {
+                            eprintln!("transfer failed: {e}");
+                            failed += 1;
+                            if first_failure.is_none() {
+                                first_failure = Some(e.clone());
+                            }
+                        }
+                    }
+                    let _ = tx.send_blocking(Msg::Transferred { id, kind, outcome });
+                }
+                let _ = tx.send_blocking(Msg::TransfersFinished {
+                    kind,
+                    dest,
+                    done,
+                    skipped,
+                    failed,
+                    first_failure,
+                });
+            })
+            .expect("failed to spawn file operation thread");
+    }
+
+    fn on_transferred(&self, id: ItemId, kind: OpKind, outcome: TransferOutcome) {
+        let TransferOutcome::Done(pairs) = outcome else { return };
+        let media: Vec<&(PathBuf, PathBuf)> = pairs.iter().filter(|(src, _)| !xmp::is_sidecar(src)).collect();
+        match kind {
+            OpKind::Move => {
+                {
+                    let mut index = self.index.borrow_mut();
+                    for (src, dst) in &media {
+                        if let Err(e) = index.rename_path(src, dst) {
+                            eprintln!("index: {e}");
+                        }
+                    }
+                }
+                self.remove_object(id);
+            }
+            OpKind::Copy => {
+                let mut index = self.index.borrow_mut();
+                let copies: Vec<FileRecord> = media
+                    .iter()
+                    .filter_map(|(src, dst)| {
+                        let mut rec = index.get(src).ok().flatten()?;
+                        rec.path = dst.clone();
+                        Some(rec)
+                    })
+                    .collect();
+                if let Err(e) = index.upsert_many(&copies) {
+                    eprintln!("index: {e}");
+                }
+            }
+        }
+    }
+
+    /// truncated to ~120 chars so a long "rollback incomplete: …" clause doesn't blow up the toast.
+    fn truncate_message(msg: &str) -> String {
+        const LIMIT: usize = 120;
+        if msg.chars().count() <= LIMIT {
+            return msg.to_string();
+        }
+        let mut truncated: String = msg.chars().take(LIMIT).collect();
+        truncated.push('…');
+        truncated
+    }
+
+    fn on_transfers_finished(
+        self: &Rc<Self>,
+        kind: OpKind,
+        dest: &std::path::Path,
+        done: usize,
+        skipped: usize,
+        failed: usize,
+        first_failure: Option<String>,
+    ) {
+        let verb = match kind {
+            OpKind::Move => "Moved",
+            OpKind::Copy => "Copied",
+        };
+        let name = dest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let mut text = format!("{verb} {done} item{} to “{name}”", if done == 1 { "" } else { "s" });
+        if skipped > 0 {
+            text.push_str(&format!(", {skipped} skipped"));
+        }
+        if failed > 0 {
+            text.push_str(&format!(", {failed} failed"));
+            if let Some(msg) = first_failure {
+                text.push_str(&format!(": {}", Self::truncate_message(&msg)));
+            }
+        }
+        self.toast(&text);
+
+        if let Some(pos) = self.viewer_resume.take() {
+            let n = self.selection.n_items();
+            if n == 0 {
+                self.close_viewer();
+            } else {
+                // `current_position()` still finds the removed object while the viewer holds
+                // its id, so check membership in `objects` directly instead.
+                let current_gone = self
+                    .widgets()
+                    .viewer
+                    .current_id()
+                    .is_some_and(|id| self.object(id).is_none());
+                if current_gone {
+                    self.show_at(pos.min(n - 1));
+                }
             }
         }
     }

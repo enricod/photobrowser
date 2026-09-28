@@ -1,3 +1,4 @@
+pub mod dialogs;
 pub mod filterbar;
 pub mod grid;
 pub mod item_object;
