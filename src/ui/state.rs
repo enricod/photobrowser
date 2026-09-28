@@ -73,6 +73,9 @@ pub enum Msg {
         skipped: usize,
         failed: usize,
         first_failure: Option<String>,
+        /// Full text of every failure whose rollback didn't complete (files may be left
+        /// in both places): too important to only show truncated in a toast.
+        rollback_failures: Vec<String>,
     },
 }
 
@@ -151,6 +154,9 @@ struct PendingBatch {
     kind: OpKind,
     policy: ConflictPolicy,
 }
+
+/// Marker `fileops` puts in a failure message when undoing a partial transfer failed.
+const ROLLBACK_INCOMPLETE: &str = "rollback incomplete";
 
 /// True once none of a batch's media paths still have a queued/in-flight XMP write.
 ///
@@ -347,7 +353,16 @@ impl AppState {
                 skipped,
                 failed,
                 first_failure,
-            } => self.on_transfers_finished(kind, &dest, done, skipped, failed, first_failure),
+                rollback_failures,
+            } => self.on_transfers_finished(
+                kind,
+                &dest,
+                done,
+                skipped,
+                failed,
+                first_failure,
+                rollback_failures,
+            ),
         }
     }
 
@@ -872,6 +887,8 @@ impl AppState {
     }
 
     pub fn close_viewer(&self) {
+        // Nothing to resume once the viewer is gone.
+        self.viewer_resume.set(None);
         let w = self.widgets();
         let pos = self.current_position(); // while still active: the viewed item
         w.stack.set_visible_child_name("grid");
@@ -893,6 +910,7 @@ impl AppState {
         // Set before selecting, so `follow_selection` sees the selection already matching.
         viewer.set_current(&obj, &text);
         self.selection.select_item(pos, true);
+        viewer.scroll_strip_to(pos);
 
         // Drop queued decodes for items that left the current ±2 window.
         let n = self.selection.n_items() as i64;
@@ -1408,6 +1426,7 @@ impl AppState {
             .spawn(move || {
                 let (mut done, mut skipped, mut failed) = (0, 0, 0);
                 let mut first_failure: Option<String> = None;
+                let mut rollback_failures: Vec<String> = Vec::new();
                 for (id, sources) in jobs {
                     let outcome = fileops::transfer_item(&sources, &dest, kind, policy);
                     match &outcome {
@@ -1418,6 +1437,9 @@ impl AppState {
                             failed += 1;
                             if first_failure.is_none() {
                                 first_failure = Some(e.clone());
+                            }
+                            if e.contains(ROLLBACK_INCOMPLETE) {
+                                rollback_failures.push(e.clone());
                             }
                         }
                     }
@@ -1430,6 +1452,7 @@ impl AppState {
                     skipped,
                     failed,
                     first_failure,
+                    rollback_failures,
                 });
             })
             .expect("failed to spawn file operation thread");
@@ -1503,6 +1526,7 @@ impl AppState {
         truncated
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn on_transfers_finished(
         self: &Rc<Self>,
         kind: OpKind,
@@ -1511,6 +1535,7 @@ impl AppState {
         skipped: usize,
         failed: usize,
         first_failure: Option<String>,
+        rollback_failures: Vec<String>,
     ) {
         let verb = match kind {
             OpKind::Move => "Moved",
@@ -1534,8 +1559,18 @@ impl AppState {
             }
         }
         self.toast(&text);
+        if !rollback_failures.is_empty() {
+            let dialog = adw::AlertDialog::new(
+                Some("Some Files Could Not Be Restored"),
+                Some(&rollback_failures.join("\n\n")),
+            );
+            dialog.add_response("ok", "_OK");
+            dialog.present(Some(&self.widgets().window));
+        }
 
-        if let Some(pos) = self.viewer_resume.take() {
+        if let Some(pos) = self.viewer_resume.take()
+            && self.viewer_active()
+        {
             let n = self.selection.n_items();
             if n == 0 {
                 self.close_viewer();

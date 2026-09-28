@@ -55,9 +55,11 @@ pub fn choose_destination(state: &Rc<AppState>, kind: OpKind) {
                 .activatable(true)
                 .build();
             row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
-            let (s, dlg, t) = (state.clone(), dialog.clone(), targets.clone());
+            let (s, dlg, t) = (state.clone(), dialog.downgrade(), targets.clone());
             row.connect_activated(move |_| {
-                dlg.close();
+                if let Some(dlg) = dlg.upgrade() {
+                    dlg.close();
+                }
                 s.start_transfer(t.clone(), dir.clone(), kind);
             });
             list.append(&row);
@@ -69,9 +71,12 @@ pub fn choose_destination(state: &Rc<AppState>, kind: OpKind) {
     let choose = gtk::Button::with_label("Choose Folder…");
     choose.add_css_class("pill");
     choose.set_halign(gtk::Align::Center);
-    let (s, dlg) = (state.clone(), dialog.clone());
+    // Weak: the dialog owns these widgets, so a strong capture would keep it alive forever.
+    let (s, dlg) = (state.clone(), dialog.downgrade());
     choose.connect_clicked(move |_| {
-        dlg.close();
+        if let Some(dlg) = dlg.upgrade() {
+            dlg.close();
+        }
         let chooser = gtk::FileDialog::builder().title(title).modal(true).build();
         let s2 = s.clone();
         let t = targets.clone();

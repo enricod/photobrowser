@@ -31,6 +31,7 @@ pub struct Viewer {
     scroller: gtk::ScrolledWindow,
     picture: gtk::Picture,
     info: gtk::Label,
+    strip: gtk::ListView,
     strip_revealer: gtk::Revealer,
     zoom: Cell<Zoom>,
     current: RefCell<Option<ItemObject>>,
@@ -91,6 +92,7 @@ impl Viewer {
             scroller,
             picture,
             info,
+            strip: strip.clone(),
             strip_revealer,
             zoom: Cell::new(Zoom::Fit),
             current: RefCell::new(None),
@@ -177,6 +179,11 @@ impl Viewer {
         let visible = !self.info.is_visible();
         self.info.set_visible(visible);
         visible
+    }
+
+    /// Keeps the filmstrip scrolled to the viewed item (without touching the selection).
+    pub fn scroll_strip_to(&self, pos: u32) {
+        self.strip.scroll_to(pos, gtk::ListScrollFlags::NONE, None);
     }
 
     pub fn toggle_strip(&self) {
