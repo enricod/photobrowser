@@ -73,8 +73,19 @@ pub fn read_rating(file: &Path) -> Result<Option<XmpRating>, XmpError> {
     Ok(raw.trim().parse::<i32>().ok().map(from_xmp_value))
 }
 
+/// Temporary file a sidecar write goes through: hidden (so scans ignore it), same folder
+/// (so the final `rename` is atomic).
+fn temp_path(sidecar: &Path) -> PathBuf {
+    let mut name = std::ffi::OsString::from(".");
+    name.push(sidecar.file_name().unwrap_or_default());
+    name.push(".pbtmp");
+    sidecar.with_file_name(name)
+}
+
 /// Writes the rating into `file`'s sidecar, preserving everything else in it.
 /// Creates the sidecar if missing or empty; refuses to touch one it cannot parse.
+/// Atomic: the edit is made on a temporary copy, synced, then renamed over the sidecar,
+/// so a crash or a failed save never leaves a truncated or half-written sidecar.
 /// Returns the sidecar's mtime (ns) after writing.
 pub fn write_rating(file: &Path, rating: u8, rejected: bool) -> Result<i64, XmpError> {
     let sidecar = sidecar_path(file);
@@ -83,13 +94,32 @@ pub fn write_rating(file: &Path, rating: u8, rejected: bool) -> Result<i64, XmpE
         Err(e) if e.kind() == io::ErrorKind::NotFound => true,
         Err(e) => return Err(e.into()),
     };
-    if needs_packet {
-        fs::write(&sidecar, EMPTY_PACKET)?;
+    let temp = temp_path(&sidecar);
+    let result = write_via_temp(&sidecar, &temp, needs_packet, rating, rejected);
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
     }
-    let meta = exif::open_path(&sidecar)?;
+    result
+}
+
+fn write_via_temp(
+    sidecar: &Path,
+    temp: &Path,
+    needs_packet: bool,
+    rating: u8,
+    rejected: bool,
+) -> Result<i64, XmpError> {
+    if needs_packet {
+        fs::write(temp, EMPTY_PACKET)?;
+    } else {
+        fs::copy(sidecar, temp)?;
+    }
+    let meta = exif::open_path(temp)?;
     meta.set_tag_string(RATING_TAG, &to_xmp_value(rating, rejected).to_string())?;
-    exif::save(&meta, &sidecar)?;
-    Ok(mtime_ns(&fs::metadata(&sidecar)?))
+    exif::save(&meta, temp)?;
+    fs::File::open(temp)?.sync_all()?;
+    fs::rename(temp, sidecar)?;
+    Ok(mtime_ns(&fs::metadata(sidecar)?))
 }
 
 #[cfg(test)]
@@ -199,6 +229,58 @@ mod tests {
             fs::read(sidecar_path(&file)).unwrap(),
             b"definitely not xmp"
         );
+        assert!(
+            !temp_path(&sidecar_path(&file)).exists(),
+            "temp left behind"
+        );
+    }
+
+    #[test]
+    fn temp_path_is_hidden_next_to_sidecar() {
+        assert_eq!(
+            temp_path(Path::new("/p/IMG_1.CR3.xmp")),
+            PathBuf::from("/p/.IMG_1.CR3.xmp.pbtmp")
+        );
+    }
+
+    #[test]
+    fn failed_write_leaves_sidecar_identical_and_no_temp() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("IMG_0001.CR3");
+        fs::copy(FIXTURE, sidecar_path(&file)).unwrap();
+        let before = fs::read(sidecar_path(&file)).unwrap();
+        // A read-only folder: the temporary copy cannot be created.
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o555)).unwrap();
+        let probe = dir.path().join(".probe");
+        if fs::write(&probe, b"").is_ok() {
+            // Running with CAP_DAC_OVERRIDE (root): permissions can't provoke a failure.
+            let _ = fs::remove_file(&probe);
+            fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+            eprintln!("permissions not enforced: skipping");
+            return;
+        }
+        let result = write_rating(&file, 5, false);
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(result.is_err());
+        assert_eq!(fs::read(sidecar_path(&file)).unwrap(), before);
+        assert!(
+            !temp_path(&sidecar_path(&file)).exists(),
+            "temp left behind"
+        );
+    }
+
+    #[test]
+    fn write_leaves_no_temp_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("IMG_0001.CR3");
+        fs::copy(FIXTURE, sidecar_path(&file)).unwrap();
+        write_rating(&file, 1, false).unwrap();
+        let names: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("IMG_0001.CR3.xmp")]);
     }
 
     /// Regression: exiv2's XMP encode (save) deletes and re-registers every custom
