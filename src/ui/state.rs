@@ -1,5 +1,5 @@
 use std::cell::{Cell, OnceCell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -99,10 +99,33 @@ pub struct AppState {
     config_save_source: RefCell<Option<glib::SourceId>>,
     /// Viewer position to resume at once an in-flight transfer finishes.
     viewer_resume: Cell<Option<u32>>,
+    /// Ids currently accepted into a move/copy batch (spawned or waiting on XMP writes to
+    /// drain): `rate()` and `start_transfer()` both skip them to avoid racing the transfer.
+    transferring: RefCell<HashSet<ItemId>>,
 }
 
 fn capacity(n: usize) -> NonZeroUsize {
     NonZeroUsize::new(n.max(1)).unwrap()
+}
+
+/// A move/copy batch that was accepted (ids already marked `transferring`) but is still
+/// waiting for its source paths to clear `xmp_inflight` before the transfer thread spawns.
+struct PendingBatch {
+    jobs: Vec<(ItemId, Vec<PathBuf>)>,
+    dest: PathBuf,
+    kind: OpKind,
+    policy: ConflictPolicy,
+}
+
+/// True once none of a batch's media paths still have a queued/in-flight XMP write.
+///
+/// Spawning the transfer while a write is in flight can race the sidecar writer thread:
+/// the transfer's plan may be built before a sidecar exists (so it isn't moved, and the
+/// writer then recreates it at the old, now-orphaned path), or the writer's save can land
+/// at the old path after the file itself was already renamed away. Waiting until every
+/// source path is clear avoids both races.
+fn batch_ready(jobs: &[(ItemId, Vec<PathBuf>)], inflight: &HashMap<PathBuf, u32>) -> bool {
+    jobs.iter().all(|(_, paths)| paths.iter().all(|p| !inflight.contains_key(p)))
 }
 
 pub fn texture_from(img: Rgba) -> gdk::Texture {
@@ -206,6 +229,7 @@ impl AppState {
             xmp_failures: Cell::new(0),
             config_save_source: RefCell::new(None),
             viewer_resume: Cell::new(None),
+            transferring: RefCell::default(),
         })
     }
 
@@ -322,6 +346,10 @@ impl AppState {
         }
         self.objects.borrow_mut().clear();
         self.filter_state.borrow_mut().pinned.clear();
+        // In-flight transfers (spawned, or still waiting on pending XMP writes) keep
+        // running: they operate on disk paths, independent of which folder is open here.
+        // Their ids are never reused, so it's enough to just forget them.
+        self.transferring.borrow_mut().clear();
         *self.folder.borrow_mut() = None;
     }
 
@@ -875,7 +903,10 @@ impl AppState {
     }
 
     pub fn rate(self: &Rc<Self>, change: RatingChange) {
-        let targets = self.rating_targets();
+        let targets: Vec<ItemObject> = {
+            let transferring = self.transferring.borrow();
+            self.rating_targets().into_iter().filter(|o| !transferring.contains(&o.id())).collect()
+        };
         if targets.is_empty() {
             return;
         }
@@ -979,13 +1010,32 @@ impl AppState {
     }
 
     pub fn start_transfer(self: &Rc<Self>, targets: Vec<ItemObject>, dest: PathBuf, kind: OpKind) {
+        let (targets, dropped_transferring) = {
+            let transferring = self.transferring.borrow();
+            let mut kept = Vec::with_capacity(targets.len());
+            let mut dropped = false;
+            for o in targets {
+                if transferring.contains(&o.id()) {
+                    dropped = true;
+                } else {
+                    kept.push(o);
+                }
+            }
+            (kept, dropped)
+        };
+        if targets.is_empty() {
+            if dropped_transferring {
+                self.toast("Already being moved");
+            }
+            return;
+        }
         let jobs: Vec<(ItemId, Vec<PathBuf>)> = targets
             .iter()
             .map(|o| o.with_item(|i| (i.id, i.files.iter().map(|f| f.path.clone()).collect())))
             .collect();
         let conflicts = jobs.iter().filter(|(_, src)| fileops::has_conflict(src, &dest)).count();
         if conflicts == 0 {
-            self.run_transfer(jobs, dest, kind, ConflictPolicy::Skip);
+            self.accept_batch(jobs, dest, kind, ConflictPolicy::Skip);
             return;
         }
         let body = format!(
@@ -1006,9 +1056,49 @@ impl AppState {
                 "rename" => ConflictPolicy::Rename,
                 _ => return,
             };
-            s.run_transfer(jobs.clone(), dest.clone(), kind, policy);
+            s.accept_batch(jobs.clone(), dest.clone(), kind, policy);
         });
         dialog.present(Some(&self.widgets().window));
+    }
+
+    /// Marks the batch's ids as `transferring` (so a second shortcut press or a rating
+    /// change on the same items is rejected/skipped instead of racing the transfer), then
+    /// waits for any of their paths still queued for an XMP write before actually running.
+    fn accept_batch(self: &Rc<Self>, jobs: Vec<(ItemId, Vec<PathBuf>)>, dest: PathBuf, kind: OpKind, policy: ConflictPolicy) {
+        {
+            let mut transferring = self.transferring.borrow_mut();
+            for (id, _) in &jobs {
+                transferring.insert(*id);
+            }
+        }
+        self.wait_then_run(jobs, dest, kind, policy);
+    }
+
+    /// Runs the batch immediately if none of its source paths are queued for an XMP write;
+    /// otherwise re-checks on a short timer until they clear. This closes the race where a
+    /// rating just applied hasn't been written to the sidecar yet: moving/copying before
+    /// the write lands can either leave the rating out of the transferred sidecar or let
+    /// the writer recreate an orphaned sidecar at the old (now-vacated) path.
+    fn wait_then_run(self: &Rc<Self>, jobs: Vec<(ItemId, Vec<PathBuf>)>, dest: PathBuf, kind: OpKind, policy: ConflictPolicy) {
+        if batch_ready(&jobs, &self.xmp_inflight.borrow()) {
+            self.run_transfer(jobs, dest, kind, policy);
+            return;
+        }
+        let s = self.clone();
+        let pending = RefCell::new(Some(PendingBatch { jobs, dest, kind, policy }));
+        glib::timeout_add_local(Duration::from_millis(50), move || {
+            let ready = pending
+                .borrow()
+                .as_ref()
+                .is_some_and(|b| batch_ready(&b.jobs, &s.xmp_inflight.borrow()));
+            if !ready {
+                return glib::ControlFlow::Continue;
+            }
+            if let Some(b) = pending.borrow_mut().take() {
+                s.run_transfer(b.jobs, b.dest, b.kind, b.policy);
+            }
+            glib::ControlFlow::Break
+        });
     }
 
     fn run_transfer(
@@ -1061,6 +1151,8 @@ impl AppState {
     }
 
     fn on_transferred(&self, id: ItemId, kind: OpKind, outcome: TransferOutcome) {
+        // Every outcome (Done, Skipped, Failed) ends this item's part of the batch.
+        self.transferring.borrow_mut().remove(&id);
         let TransferOutcome::Done(pairs) = outcome else { return };
         let media: Vec<&(PathBuf, PathBuf)> = pairs.iter().filter(|(src, _)| !xmp::is_sidecar(src)).collect();
         match kind {
@@ -1068,8 +1160,18 @@ impl AppState {
                 {
                     let mut index = self.index.borrow_mut();
                     for (src, dst) in &media {
-                        if let Err(e) = index.rename_path(src, dst) {
-                            eprintln!("index: {e}");
+                        match index.rename_path(src, dst) {
+                            Ok(()) => {
+                                // A rating applied after this transfer's plan was built (or
+                                // whose write raced the move) can leave the re-keyed row
+                                // dirty: make sure the destination sidecar gets it too.
+                                if let Ok(Some(rec)) = index.get(dst)
+                                    && rec.xmp_dirty
+                                {
+                                    self.write_xmp(rec.path.clone(), rec.rating, rec.rejected);
+                                }
+                            }
+                            Err(e) => eprintln!("index: {e}"),
                         }
                     }
                 }
@@ -1146,5 +1248,38 @@ impl AppState {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn jobs(paths: Vec<&str>) -> Vec<(ItemId, Vec<PathBuf>)> {
+        vec![(1, paths.into_iter().map(PathBuf::from).collect())]
+    }
+
+    #[test]
+    fn batch_ready_waits_for_any_inflight_source_path() {
+        let mut inflight = HashMap::new();
+        inflight.insert(PathBuf::from("/a/IMG_1.CR3"), 1);
+        let batch = jobs(vec!["/a/IMG_1.CR3", "/a/IMG_1.JPG"]);
+        assert!(!batch_ready(&batch, &inflight));
+
+        inflight.remove(&PathBuf::from("/a/IMG_1.CR3"));
+        assert!(batch_ready(&batch, &inflight));
+    }
+
+    #[test]
+    fn batch_ready_ignores_unrelated_inflight_paths() {
+        let mut inflight = HashMap::new();
+        inflight.insert(PathBuf::from("/other/IMG_9.CR3"), 1);
+        let batch = jobs(vec!["/a/IMG_1.CR3", "/a/IMG_1.JPG"]);
+        assert!(batch_ready(&batch, &inflight));
+    }
+
+    #[test]
+    fn batch_ready_is_true_for_empty_batch() {
+        assert!(batch_ready(&[], &HashMap::new()));
     }
 }
