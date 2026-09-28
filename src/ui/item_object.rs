@@ -29,11 +29,19 @@ mod imp {
             PROPS.get_or_init(|| {
                 vec![
                     glib::ParamSpecString::builder("stars").read_only().build(),
-                    glib::ParamSpecBoolean::builder("rejected").read_only().build(),
-                    glib::ParamSpecBoolean::builder("is-pair").read_only().build(),
+                    glib::ParamSpecBoolean::builder("rejected")
+                        .read_only()
+                        .build(),
+                    glib::ParamSpecBoolean::builder("is-pair")
+                        .read_only()
+                        .build(),
                     glib::ParamSpecString::builder("name").read_only().build(),
-                    glib::ParamSpecObject::builder::<gdk::Paintable>("thumbnail").read_only().build(),
-                    glib::ParamSpecBoolean::builder("has-error").read_only().build(),
+                    glib::ParamSpecObject::builder::<gdk::Paintable>("thumbnail")
+                        .read_only()
+                        .build(),
+                    glib::ParamSpecBoolean::builder("has-error")
+                        .read_only()
+                        .build(),
                     glib::ParamSpecString::builder("error").read_only().build(),
                 ]
             })
@@ -44,7 +52,13 @@ mod imp {
             let item = item.as_ref();
             match pspec.name() {
                 "stars" => item
-                    .map(|i| if i.rejected { String::new() } else { stars_text(i.rating) })
+                    .map(|i| {
+                        if i.rejected {
+                            String::new()
+                        } else {
+                            stars_text(i.rating)
+                        }
+                    })
                     .unwrap_or_default()
                     .to_value(),
                 "rejected" => item.is_some_and(|i| i.rejected).to_value(),
@@ -84,7 +98,12 @@ impl ItemObject {
     }
 
     pub fn with_item<R>(&self, f: impl FnOnce(&Item) -> R) -> R {
-        f(self.imp().item.borrow().as_ref().expect("ItemObject without item"))
+        f(self
+            .imp()
+            .item
+            .borrow()
+            .as_ref()
+            .expect("ItemObject without item"))
     }
 
     pub fn set_item(&self, item: Item) {
@@ -93,7 +112,12 @@ impl ItemObject {
     }
 
     pub fn update_item(&self, f: impl FnOnce(&mut Item)) {
-        f(self.imp().item.borrow_mut().as_mut().expect("ItemObject without item"));
+        f(self
+            .imp()
+            .item
+            .borrow_mut()
+            .as_mut()
+            .expect("ItemObject without item"));
         self.notify_item();
     }
 

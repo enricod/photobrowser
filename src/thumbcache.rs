@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::decode::jpeg::decode_jpeg;
 use crate::decode::Rgba;
+use crate::decode::jpeg::decode_jpeg;
 use crate::media::MediaFile;
 
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -56,7 +56,11 @@ impl DiskCache {
         let jpeg = encode_jpeg(img).map_err(io::Error::other)?;
         let target = self.path_for(file);
         let n = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let tmp = self.dir.join(format!(".{}.{}.{n}.tmp", Self::key(file), std::process::id()));
+        let tmp = self.dir.join(format!(
+            ".{}.{}.{n}.tmp",
+            Self::key(file),
+            std::process::id()
+        ));
         fs::write(&tmp, &jpeg)?;
         fs::rename(&tmp, &target).inspect_err(|_| {
             let _ = fs::remove_file(&tmp);
@@ -117,7 +121,12 @@ mod tests {
     use std::time::{Duration, UNIX_EPOCH};
 
     fn media(path: &str, size: u64, mtime_ns: i64) -> MediaFile {
-        MediaFile { path: PathBuf::from(path), kind: FileKind::Jpeg, size, mtime_ns }
+        MediaFile {
+            path: PathBuf::from(path),
+            kind: FileKind::Jpeg,
+            size,
+            mtime_ns,
+        }
     }
 
     fn thumb() -> Rgba {
@@ -197,6 +206,9 @@ mod tests {
         assert_eq!(cache.cleanup().unwrap(), 100);
         assert!(!dir.path().join("old.jpg").exists());
         assert!(dir.path().join("new.jpg").exists());
-        assert!(tmp_path.exists(), "temp file must not be deleted by cleanup");
+        assert!(
+            tmp_path.exists(),
+            "temp file must not be deleted by cleanup"
+        );
     }
 }

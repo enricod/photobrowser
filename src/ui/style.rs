@@ -25,9 +25,17 @@ pub fn load() {
     let display = gdk::Display::default().expect("no display");
     let base = gtk::CssProvider::new();
     base.load_from_string(BASE_CSS);
-    gtk::style_context_add_provider_for_display(&display, &base, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
+    gtk::style_context_add_provider_for_display(
+        &display,
+        &base,
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
     SIZE_PROVIDER.with(|p| {
-        gtk::style_context_add_provider_for_display(&display, p, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION)
+        gtk::style_context_add_provider_for_display(
+            &display,
+            p,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        )
     });
 }
 
@@ -35,6 +43,8 @@ pub fn load() {
 pub fn set_thumb_size(px: i32) {
     let px = px.clamp(THUMB_SIZE_MIN, THUMB_SIZE_MAX);
     SIZE_PROVIDER.with(|p| {
-        p.load_from_string(&format!(".pb-thumb {{ min-width: {px}px; min-height: {px}px; }}"))
+        p.load_from_string(&format!(
+            ".pb-thumb {{ min-width: {px}px; min-height: {px}px; }}"
+        ))
     });
 }

@@ -115,7 +115,11 @@ pub fn transfer_item(
             if !incomplete.is_empty() {
                 msg.push_str("; rollback incomplete:");
                 for (src, dst) in incomplete {
-                    msg.push_str(&format!(" {} could not be restored to {}", dst.display(), src.display()));
+                    msg.push_str(&format!(
+                        " {} could not be restored to {}",
+                        dst.display(),
+                        src.display()
+                    ));
                 }
             }
             return TransferOutcome::Failed(msg);
@@ -127,7 +131,10 @@ pub fn transfer_item(
 
 fn transfer_one(src: &Path, dst: &Path, kind: OpKind) -> io::Result<()> {
     if exists(dst) {
-        return Err(io::Error::new(io::ErrorKind::AlreadyExists, "destination exists"));
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "destination exists",
+        ));
     }
     match kind {
         OpKind::Copy => copy_verified(src, dst),
@@ -162,7 +169,10 @@ fn copy_verified(src: &Path, dst: &Path) -> io::Result<()> {
             return Err(io::Error::other("size mismatch after copy"));
         }
         if exists(dst) {
-            return Err(io::Error::new(io::ErrorKind::AlreadyExists, "destination exists"));
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "destination exists",
+            ));
         }
         fs::rename(&tmp, dst)
     })();
@@ -223,7 +233,11 @@ mod tests {
         let dst = tmp.path().join("dst");
         fs::create_dir(&src).unwrap();
         fs::create_dir(&dst).unwrap();
-        Fixture { _tmp: tmp, src, dst }
+        Fixture {
+            _tmp: tmp,
+            src,
+            dst,
+        }
     }
 
     fn write(p: &Path, content: &str) {
@@ -254,7 +268,9 @@ mod tests {
         let f = fixture();
         let sources = pair(&f);
         let out = transfer_item(&sources, &f.dst, OpKind::Move, ConflictPolicy::Skip);
-        let TransferOutcome::Done(done) = out else { panic!("{out:?}") };
+        let TransferOutcome::Done(done) = out else {
+            panic!("{out:?}")
+        };
         assert_eq!(done.len(), 3);
         assert_eq!(names(&f.dst), ["IMG_1.CR3", "IMG_1.CR3.xmp", "IMG_1.JPG"]);
         assert!(names(&f.src).is_empty());
@@ -269,7 +285,10 @@ mod tests {
         assert!(matches!(out, TransferOutcome::Done(_)));
         assert_eq!(names(&f.src).len(), 3);
         assert_eq!(names(&f.dst).len(), 3);
-        let after = fs::metadata(f.dst.join("IMG_1.CR3")).unwrap().modified().unwrap();
+        let after = fs::metadata(f.dst.join("IMG_1.CR3"))
+            .unwrap()
+            .modified()
+            .unwrap();
         assert_eq!(before, after);
         assert_eq!(fs::read_to_string(f.dst.join("IMG_1.JPG")).unwrap(), "jpg");
     }
@@ -283,7 +302,10 @@ mod tests {
         let out = transfer_item(&sources, &f.dst, OpKind::Move, ConflictPolicy::Skip);
         assert_eq!(out, TransferOutcome::Skipped);
         assert_eq!(names(&f.src).len(), 3);
-        assert_eq!(fs::read_to_string(f.dst.join("IMG_1.JPG")).unwrap(), "existing");
+        assert_eq!(
+            fs::read_to_string(f.dst.join("IMG_1.JPG")).unwrap(),
+            "existing"
+        );
     }
 
     #[test]
@@ -297,7 +319,10 @@ mod tests {
             names(&f.dst),
             ["IMG_1.JPG", "IMG_1_1.CR3", "IMG_1_1.CR3.xmp", "IMG_1_1.JPG"]
         );
-        assert_eq!(fs::read_to_string(f.dst.join("IMG_1.JPG")).unwrap(), "existing");
+        assert_eq!(
+            fs::read_to_string(f.dst.join("IMG_1.JPG")).unwrap(),
+            "existing"
+        );
     }
 
     #[test]
@@ -317,7 +342,12 @@ mod tests {
         write(&raw, "raw");
         write(&sidecar_path(&raw), "xmp");
         let missing = f.src.join("IMG_1.JPG"); // never created → second transfer fails
-        let out = transfer_item(&[raw.clone(), missing], &f.dst, OpKind::Move, ConflictPolicy::Skip);
+        let out = transfer_item(
+            &[raw.clone(), missing],
+            &f.dst,
+            OpKind::Move,
+            ConflictPolicy::Skip,
+        );
         assert!(matches!(out, TransferOutcome::Failed(_)), "{out:?}");
         assert_eq!(names(&f.src), ["IMG_1.CR3", "IMG_1.CR3.xmp"]);
         assert!(names(&f.dst).is_empty());
@@ -362,8 +392,12 @@ mod tests {
         // /dev/shm is tmpfs on Fedora; the project dir is usually on a disk.
         use std::os::unix::fs::MetadataExt;
         let shm = Path::new("/dev/shm");
-        let Ok(src_dir) = tempfile::tempdir_in(shm) else { return };
-        let Ok(dst_dir) = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")) else { return };
+        let Ok(src_dir) = tempfile::tempdir_in(shm) else {
+            return;
+        };
+        let Ok(dst_dir) = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")) else {
+            return;
+        };
         let dev = |p: &Path| fs::metadata(p).unwrap().dev();
         if dev(src_dir.path()) == dev(dst_dir.path()) {
             eprintln!("same filesystem: skipping cross-fs test");
@@ -371,10 +405,18 @@ mod tests {
         }
         let p = src_dir.path().join("a.jpg");
         write(&p, "content");
-        let out = transfer_item(std::slice::from_ref(&p), dst_dir.path(), OpKind::Move, ConflictPolicy::Skip);
+        let out = transfer_item(
+            std::slice::from_ref(&p),
+            dst_dir.path(),
+            OpKind::Move,
+            ConflictPolicy::Skip,
+        );
         assert!(matches!(out, TransferOutcome::Done(_)));
         assert!(!p.exists());
-        assert_eq!(fs::read_to_string(dst_dir.path().join("a.jpg")).unwrap(), "content");
+        assert_eq!(
+            fs::read_to_string(dst_dir.path().join("a.jpg")).unwrap(),
+            "content"
+        );
     }
 
     #[test]

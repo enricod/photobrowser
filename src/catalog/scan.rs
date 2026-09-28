@@ -3,7 +3,7 @@ use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use crate::media::{mtime_ns, FileKind, MediaFile};
+use crate::media::{FileKind, MediaFile, mtime_ns};
 
 /// Lists supported, non-hidden regular files directly inside `folder` (symlinks followed).
 pub fn list_media_files(folder: &Path) -> io::Result<Vec<MediaFile>> {
@@ -14,12 +14,21 @@ pub fn list_media_files(folder: &Path) -> io::Result<Vec<MediaFile>> {
             continue;
         }
         let path = entry.path();
-        let Some(kind) = FileKind::from_path(&path) else { continue };
-        let Ok(meta) = fs::metadata(&path) else { continue };
+        let Some(kind) = FileKind::from_path(&path) else {
+            continue;
+        };
+        let Ok(meta) = fs::metadata(&path) else {
+            continue;
+        };
         if !meta.is_file() {
             continue;
         }
-        out.push(MediaFile { path, kind, size: meta.len(), mtime_ns: mtime_ns(&meta) });
+        out.push(MediaFile {
+            path,
+            kind,
+            size: meta.len(),
+            mtime_ns: mtime_ns(&meta),
+        });
     }
     Ok(out)
 }

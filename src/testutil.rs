@@ -10,7 +10,11 @@ pub fn write_jpeg(path: &Path, w: u32, h: u32, rgb: [u8; 3]) {
 /// Left half red, right half green.
 pub fn write_two_tone_jpeg(path: &Path, w: u32, h: u32) {
     image::RgbImage::from_fn(w, h, |x, _| {
-        if x < w / 2 { image::Rgb([255, 0, 0]) } else { image::Rgb([0, 255, 0]) }
+        if x < w / 2 {
+            image::Rgb([255, 0, 0])
+        } else {
+            image::Rgb([0, 255, 0])
+        }
     })
     .save_with_format(path, image::ImageFormat::Jpeg)
     .unwrap();

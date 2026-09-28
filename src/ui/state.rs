@@ -3,8 +3,8 @@ use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::mpsc;
 use std::sync::Arc;
+use std::sync::mpsc;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -13,13 +13,13 @@ use gtk::{gdk, gio, glib};
 use lru::LruCache;
 
 use super::item_object::ItemObject;
-use super::viewer::{info_text, Viewer};
+use super::viewer::{Viewer, info_text};
 use crate::catalog::diff::diff_items;
 use crate::catalog::rating::{self, RatingChange};
 use crate::catalog::sync::{self, ScanResult};
 use crate::config::Config;
-use crate::exif::{self, ExifInfo};
 use crate::decode::{self, Quality, Rgba, THUMB_EDGE};
+use crate::exif::{self, ExifInfo};
 use crate::fileops::{self, ConflictPolicy, OpKind, TransferOutcome};
 use crate::filter::{self, FilterState, SortState};
 use crate::index::{FileRecord, Index};
@@ -37,12 +37,35 @@ pub enum Zoom {
 /// Results sent from worker threads to the GTK main thread.
 pub enum Msg {
     /// `serial` identifies the request; a result whose serial is no longer pending is stale.
-    Thumb { id: ItemId, generation: u64, serial: u64, result: Result<Rgba, String> },
-    Scanned { generation: u64, result: Result<ScanResult, String> },
-    XmpWritten { path: PathBuf, result: Result<i64, String> },
-    Full { id: ItemId, generation: u64, zoom: Zoom, result: Result<Rgba, String> },
-    Exif { id: ItemId, info: ExifInfo },
-    Transferred { id: ItemId, kind: OpKind, outcome: TransferOutcome },
+    Thumb {
+        id: ItemId,
+        generation: u64,
+        serial: u64,
+        result: Result<Rgba, String>,
+    },
+    Scanned {
+        generation: u64,
+        result: Result<ScanResult, String>,
+    },
+    XmpWritten {
+        path: PathBuf,
+        result: Result<i64, String>,
+    },
+    Full {
+        id: ItemId,
+        generation: u64,
+        zoom: Zoom,
+        result: Result<Rgba, String>,
+    },
+    Exif {
+        id: ItemId,
+        info: ExifInfo,
+    },
+    Transferred {
+        id: ItemId,
+        kind: OpKind,
+        outcome: TransferOutcome,
+    },
     TransfersFinished {
         kind: OpKind,
         dest: PathBuf,
@@ -131,7 +154,8 @@ struct PendingBatch {
 /// at the old path after the file itself was already renamed away. Waiting until every
 /// source path is clear avoids both races.
 fn batch_ready(jobs: &[(ItemId, Vec<PathBuf>)], inflight: &HashMap<PathBuf, u32>) -> bool {
-    jobs.iter().all(|(_, paths)| paths.iter().all(|p| !inflight.contains_key(p)))
+    jobs.iter()
+        .all(|(_, paths)| paths.iter().all(|p| !inflight.contains_key(p)))
 }
 
 pub fn texture_from(img: Rgba) -> gdk::Texture {
@@ -160,8 +184,15 @@ fn spawn_xmp_writer(tx: async_channel::Sender<Msg>) -> mpsc::Sender<XmpJob> {
         .name("pb-xmp".into())
         .spawn(move || {
             for job in job_rx {
-                let result = xmp::write_rating(&job.path, job.rating, job.rejected).map_err(|e| e.to_string());
-                if tx.send_blocking(Msg::XmpWritten { path: job.path, result }).is_err() {
+                let result = xmp::write_rating(&job.path, job.rating, job.rejected)
+                    .map_err(|e| e.to_string());
+                if tx
+                    .send_blocking(Msg::XmpWritten {
+                        path: job.path,
+                        result,
+                    })
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -244,7 +275,9 @@ impl AppState {
     }
 
     pub fn widgets(&self) -> &Widgets {
-        self.widgets.get().expect("widgets are set during window construction")
+        self.widgets
+            .get()
+            .expect("widgets are set during window construction")
     }
 
     pub fn toast(&self, text: &str) {
@@ -275,38 +308,63 @@ impl AppState {
 
     pub fn update_counter(&self) {
         if let Some(w) = self.widgets.get() {
-            w.counter
-                .set_label(&format!("{} / {}", self.selection.n_items(), self.store.n_items()));
+            w.counter.set_label(&format!(
+                "{} / {}",
+                self.selection.n_items(),
+                self.store.n_items()
+            ));
         }
     }
 
     pub fn handle(self: &Rc<Self>, msg: Msg) {
         match msg {
-            Msg::Thumb { id, generation, serial, result } => self.on_thumb(id, generation, serial, result),
+            Msg::Thumb {
+                id,
+                generation,
+                serial,
+                result,
+            } => self.on_thumb(id, generation, serial, result),
             Msg::Scanned { generation, result } => self.on_scanned(generation, result),
             Msg::XmpWritten { path, result } => self.on_xmp_written(path, result),
-            Msg::Full { id, generation, zoom, result } => self.on_full(id, generation, zoom, result),
+            Msg::Full {
+                id,
+                generation,
+                zoom,
+                result,
+            } => self.on_full(id, generation, zoom, result),
             Msg::Exif { id, info } => self.on_exif(id, info),
             Msg::Transferred { id, kind, outcome } => self.on_transferred(id, kind, outcome),
-            Msg::TransfersFinished { kind, dest, done, skipped, failed, first_failure } => {
-                self.on_transfers_finished(kind, &dest, done, skipped, failed, first_failure)
-            }
+            Msg::TransfersFinished {
+                kind,
+                dest,
+                done,
+                skipped,
+                failed,
+                first_failure,
+            } => self.on_transfers_finished(kind, &dest, done, skipped, failed, first_failure),
         }
     }
 
     // ---- folders -------------------------------------------------------------
 
     pub fn choose_folder(self: &Rc<Self>) {
-        let dialog = gtk::FileDialog::builder().title("Open Folder").modal(true).build();
+        let dialog = gtk::FileDialog::builder()
+            .title("Open Folder")
+            .modal(true)
+            .build();
         if let Some(folder) = self.folder() {
             dialog.set_initial_folder(Some(&gio::File::for_path(folder)));
         }
         let s = self.clone();
-        dialog.select_folder(Some(&self.widgets().window), gio::Cancellable::NONE, move |res| {
-            if let Some(path) = res.ok().and_then(|f| f.path()) {
-                s.open_folder(path);
-            }
-        });
+        dialog.select_folder(
+            Some(&self.widgets().window),
+            gio::Cancellable::NONE,
+            move |res| {
+                if let Some(path) = res.ok().and_then(|f| f.path()) {
+                    s.open_folder(path);
+                }
+            },
+        );
     }
 
     pub fn open_folder(self: &Rc<Self>, folder: PathBuf) {
@@ -321,7 +379,9 @@ impl AppState {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| folder.display().to_string());
-        self.widgets().window.set_title(Some(&format!("{name} — Photobrowser")));
+        self.widgets()
+            .window
+            .set_title(Some(&format!("{name} — Photobrowser")));
 
         let known = self.index.borrow().load_folder(&folder).unwrap_or_default();
         let mut items = sync::items_from_records(&known);
@@ -451,16 +511,28 @@ impl AppState {
             }
         }
 
-        let old: Vec<Item> = self.objects.borrow().values().map(ItemObject::item).collect();
+        let old: Vec<Item> = self
+            .objects
+            .borrow()
+            .values()
+            .map(ItemObject::item)
+            .collect();
         let diff = diff_items(&old, scan.items, || self.alloc_id());
         for id in diff.removed {
             self.remove_object(id);
         }
         for update in diff.updated {
-            let Some(obj) = self.object(update.item.id) else { continue };
+            let Some(obj) = self.object(update.item.id) else {
+                continue;
+            };
             let mut item = update.item;
             // The index is the truth for ratings: it keeps pending local edits.
-            let rec = self.index.borrow().get(&item.display_file().path).ok().flatten();
+            let rec = self
+                .index
+                .borrow()
+                .get(&item.display_file().path)
+                .ok()
+                .flatten();
             if let Some(rec) = rec {
                 item.rating = rec.rating;
                 item.rejected = rec.rejected;
@@ -478,7 +550,10 @@ impl AppState {
             }
         }
         let warm: Vec<MediaFile> = if self.first_scan_done.replace(true) {
-            diff.added.iter().map(|i| i.display_file().clone()).collect()
+            diff.added
+                .iter()
+                .map(|i| i.display_file().clone())
+                .collect()
         } else {
             let existing = self.objects.borrow();
             existing
@@ -498,7 +573,9 @@ impl AppState {
 
     fn watch_folder(self: &Rc<Self>, folder: &std::path::Path) {
         let dir = gio::File::for_path(folder);
-        let monitor = match dir.monitor_directory(gio::FileMonitorFlags::WATCH_MOVES, gio::Cancellable::NONE) {
+        let monitor = match dir
+            .monitor_directory(gio::FileMonitorFlags::WATCH_MOVES, gio::Cancellable::NONE)
+        {
             Ok(m) => m,
             Err(e) => {
                 eprintln!("cannot watch {}: {e}", folder.display());
@@ -509,10 +586,14 @@ impl AppState {
         monitor.connect_changed(move |_, changed, _, event| {
             let is_dir_itself = changed.equal(&dir);
             match event {
-                gio::FileMonitorEvent::Deleted | gio::FileMonitorEvent::MovedOut if is_dir_itself => {
+                gio::FileMonitorEvent::Deleted | gio::FileMonitorEvent::MovedOut
+                    if is_dir_itself =>
+                {
                     s.folder_lost("The folder was removed");
                 }
-                gio::FileMonitorEvent::Unmounted => s.folder_lost("The folder's drive was unmounted"),
+                gio::FileMonitorEvent::Unmounted => {
+                    s.folder_lost("The folder's drive was unmounted")
+                }
                 _ => s.schedule_rescan(),
             }
         });
@@ -577,19 +658,28 @@ impl AppState {
         let token = CancelToken::new();
         let serial = self.next_thumb_serial.get() + 1;
         self.next_thumb_serial.set(serial);
-        self.pending_thumbs.borrow_mut().insert(id, (serial, token.clone()));
+        self.pending_thumbs
+            .borrow_mut()
+            .insert(id, (serial, token.clone()));
         let file = obj.with_item(|i| i.display_file().clone());
         let (disk, tx, generation) = (self.disk.clone(), self.tx.clone(), self.generation.get());
         self.pool.submit(priority, token, move || {
             let result = match disk.load(&file) {
                 Some(img) => Ok(img),
-                None => decode::guarded(|| decode::decode_for_display(&file, THUMB_EDGE, Quality::Fast))
-                    .inspect(|img| {
-                        let _ = disk.store(&file, img);
-                    })
-                    .map_err(|e| e.to_string()),
+                None => {
+                    decode::guarded(|| decode::decode_for_display(&file, THUMB_EDGE, Quality::Fast))
+                        .inspect(|img| {
+                            let _ = disk.store(&file, img);
+                        })
+                        .map_err(|e| e.to_string())
+                }
             };
-            let _ = tx.send_blocking(Msg::Thumb { id, generation, serial, result });
+            let _ = tx.send_blocking(Msg::Thumb {
+                id,
+                generation,
+                serial,
+                result,
+            });
         });
     }
 
@@ -643,15 +733,16 @@ impl AppState {
     fn warm_disk_cache(&self, files: Vec<MediaFile>) {
         for file in files {
             let disk = self.disk.clone();
-            self.pool.submit(Priority::Background, CancelToken::new(), move || {
-                if !disk.contains(&file)
-                    && let Ok(img) = decode::guarded(|| {
-                        decode::decode_for_display(&file, THUMB_EDGE, Quality::Fast)
-                    })
-                {
-                    let _ = disk.store(&file, &img);
-                }
-            });
+            self.pool
+                .submit(Priority::Background, CancelToken::new(), move || {
+                    if !disk.contains(&file)
+                        && let Ok(img) = decode::guarded(|| {
+                            decode::decode_for_display(&file, THUMB_EDGE, Quality::Fast)
+                        })
+                    {
+                        let _ = disk.store(&file, &img);
+                    }
+                });
         }
     }
 
@@ -693,9 +784,10 @@ impl AppState {
     }
 
     pub fn zoom_thumbs(self: &Rc<Self>, step: i32) {
-        use super::style::{set_thumb_size, THUMB_SIZE_MAX, THUMB_SIZE_MIN, THUMB_SIZE_STEP};
+        use super::style::{THUMB_SIZE_MAX, THUMB_SIZE_MIN, THUMB_SIZE_STEP, set_thumb_size};
         let mut config = self.config.borrow_mut();
-        let size = (config.thumb_display_size + step * THUMB_SIZE_STEP).clamp(THUMB_SIZE_MIN, THUMB_SIZE_MAX);
+        let size = (config.thumb_display_size + step * THUMB_SIZE_STEP)
+            .clamp(THUMB_SIZE_MIN, THUMB_SIZE_MAX);
         if size != config.thumb_display_size {
             config.thumb_display_size = size;
             set_thumb_size(size);
@@ -752,12 +844,18 @@ impl AppState {
         let pos = self.current_position(); // while still active: the viewed item
         w.stack.set_visible_child_name("grid");
         if let Some(pos) = pos {
-            w.grid.scroll_to(pos, gtk::ListScrollFlags::FOCUS | gtk::ListScrollFlags::SELECT, None);
+            w.grid.scroll_to(
+                pos,
+                gtk::ListScrollFlags::FOCUS | gtk::ListScrollFlags::SELECT,
+                None,
+            );
         }
     }
 
     pub fn show_at(self: &Rc<Self>, pos: u32) {
-        let Some(obj) = self.selection.item(pos).and_downcast::<ItemObject>() else { return };
+        let Some(obj) = self.selection.item(pos).and_downcast::<ItemObject>() else {
+            return;
+        };
         let viewer = self.widgets().viewer.clone();
         let text = self.info_for(&obj);
         // Set before selecting, so `follow_selection` sees the selection already matching.
@@ -771,15 +869,21 @@ impl AppState {
             .filter_map(|p| self.selection.item(p as u32).and_downcast::<ItemObject>())
             .map(|o| o.id())
             .collect();
-        self.pending_full.borrow_mut().retain(|(id, _), (_, token)| {
-            let keep = window.contains(id);
-            if !keep {
-                token.cancel();
-            }
-            keep
-        });
+        self.pending_full
+            .borrow_mut()
+            .retain(|(id, _), (_, token)| {
+                let keep = window.contains(id);
+                if !keep {
+                    token.cancel();
+                }
+                keep
+            });
 
-        let cached = self.full_cache.borrow_mut().get(&(obj.id(), Zoom::Fit)).cloned();
+        let cached = self
+            .full_cache
+            .borrow_mut()
+            .get(&(obj.id(), Zoom::Fit))
+            .cloned();
         match cached {
             Some(texture) => viewer.set_texture(&texture),
             None => {
@@ -822,7 +926,9 @@ impl AppState {
     }
 
     pub fn step(self: &Rc<Self>, delta: i64) {
-        let Some(cur) = self.current_position() else { return };
+        let Some(cur) = self.current_position() else {
+            return;
+        };
         let n = self.selection.n_items() as i64;
         if n == 0 {
             return;
@@ -882,7 +988,9 @@ impl AppState {
             token.cancel();
         }
         let token = CancelToken::new();
-        self.pending_full.borrow_mut().insert(key, (priority, token.clone()));
+        self.pending_full
+            .borrow_mut()
+            .insert(key, (priority, token.clone()));
         let item = obj.item();
         let edge = self.screen_edge();
         let (tx, generation) = (self.tx.clone(), self.generation.get());
@@ -892,7 +1000,12 @@ impl AppState {
                 Zoom::Actual => decode::decode_actual_size(&item),
             })
             .map_err(|e| e.to_string());
-            let _ = tx.send_blocking(Msg::Full { id: item.id, generation, zoom, result });
+            let _ = tx.send_blocking(Msg::Full {
+                id: item.id,
+                generation,
+                zoom,
+                result,
+            });
         });
     }
 
@@ -910,7 +1023,9 @@ impl AppState {
         match result {
             Ok(img) => {
                 let texture = texture_from(img);
-                self.full_cache.borrow_mut().push((id, zoom), texture.clone());
+                self.full_cache
+                    .borrow_mut()
+                    .push((id, zoom), texture.clone());
                 if is_current && viewer.zoom() == zoom {
                     viewer.set_texture(&texture);
                 }
@@ -924,11 +1039,16 @@ impl AppState {
         if self.exif_cache.borrow().contains_key(&obj.id()) {
             return;
         }
-        let (id, path) = obj.with_item(|i| (i.id, i.raw_file().unwrap_or(i.display_file()).path.clone()));
+        let (id, path) =
+            obj.with_item(|i| (i.id, i.raw_file().unwrap_or(i.display_file()).path.clone()));
         let tx = self.tx.clone();
-        self.pool.submit(Priority::Visible, CancelToken::new(), move || {
-            let _ = tx.send_blocking(Msg::Exif { id, info: exif::read_info(&path) });
-        });
+        self.pool
+            .submit(Priority::Visible, CancelToken::new(), move || {
+                let _ = tx.send_blocking(Msg::Exif {
+                    id,
+                    info: exif::read_info(&path),
+                });
+            });
     }
 
     fn on_exif(&self, id: ItemId, info: ExifInfo) {
@@ -973,7 +1093,10 @@ impl AppState {
     pub fn rate(self: &Rc<Self>, change: RatingChange) {
         let targets: Vec<ItemObject> = {
             let transferring = self.transferring.borrow();
-            self.rating_targets().into_iter().filter(|o| !transferring.contains(&o.id())).collect()
+            self.rating_targets()
+                .into_iter()
+                .filter(|o| !transferring.contains(&o.id()))
+                .collect()
         };
         if targets.is_empty() {
             return;
@@ -986,7 +1109,11 @@ impl AppState {
             obj.update_item(|item| rating::apply(item, change));
             let item = obj.item();
             for file in &item.files {
-                if let Err(e) = self.index.borrow().set_rating(file, item.rating, item.rejected) {
+                if let Err(e) = self
+                    .index
+                    .borrow()
+                    .set_rating(file, item.rating, item.rejected)
+                {
                     eprintln!("index: {e}");
                 }
                 self.write_xmp(file.path.clone(), item.rating, item.rejected);
@@ -1001,8 +1128,16 @@ impl AppState {
     }
 
     fn write_xmp(&self, path: PathBuf, rating: u8, rejected: bool) {
-        *self.xmp_inflight.borrow_mut().entry(path.clone()).or_insert(0) += 1;
-        let _ = self.xmp_tx.send(XmpJob { path, rating, rejected });
+        *self
+            .xmp_inflight
+            .borrow_mut()
+            .entry(path.clone())
+            .or_insert(0) += 1;
+        let _ = self.xmp_tx.send(XmpJob {
+            path,
+            rating,
+            rejected,
+        });
     }
 
     fn on_xmp_written(self: &Rc<Self>, path: PathBuf, result: Result<i64, String>) {
@@ -1037,7 +1172,10 @@ impl AppState {
             let s = self.clone();
             glib::timeout_add_local_once(Duration::from_millis(500), move || {
                 let n = s.xmp_failures.replace(0);
-                s.toast(&format!("Couldn't write XMP for {n} file{}", if n == 1 { "" } else { "s" }));
+                s.toast(&format!(
+                    "Couldn't write XMP for {n} file{}",
+                    if n == 1 { "" } else { "s" }
+                ));
             });
         }
     }
@@ -1045,7 +1183,11 @@ impl AppState {
     /// Retries sidecar writes that failed or never ran (e.g. the app was closed).
     fn flush_dirty_xmp(&self) {
         let Some(folder) = self.folder() else { return };
-        let dirty = self.index.borrow().dirty_records(&folder).unwrap_or_default();
+        let dirty = self
+            .index
+            .borrow()
+            .dirty_records(&folder)
+            .unwrap_or_default();
         for rec in dirty {
             let in_flight = self.xmp_inflight.borrow().contains_key(&rec.path);
             if !in_flight {
@@ -1101,7 +1243,10 @@ impl AppState {
             .iter()
             .map(|o| o.with_item(|i| (i.id, i.files.iter().map(|f| f.path.clone()).collect())))
             .collect();
-        let conflicts = jobs.iter().filter(|(_, src)| fileops::has_conflict(src, &dest)).count();
+        let conflicts = jobs
+            .iter()
+            .filter(|(_, src)| fileops::has_conflict(src, &dest))
+            .count();
         if conflicts == 0 {
             self.accept_batch(jobs, dest, kind, ConflictPolicy::Skip);
             return;
@@ -1113,7 +1258,11 @@ impl AppState {
             dest.display()
         );
         let dialog = adw::AlertDialog::new(Some("Files Already Exist"), Some(&body));
-        dialog.add_responses(&[("cancel", "_Cancel"), ("skip", "_Skip Existing"), ("rename", "_Keep Both")]);
+        dialog.add_responses(&[
+            ("cancel", "_Cancel"),
+            ("skip", "_Skip Existing"),
+            ("rename", "_Keep Both"),
+        ]);
         dialog.set_response_appearance("rename", adw::ResponseAppearance::Suggested);
         dialog.set_default_response(Some("rename"));
         dialog.set_close_response("cancel");
@@ -1132,7 +1281,13 @@ impl AppState {
     /// Marks the batch's ids as `transferring` (so a second shortcut press or a rating
     /// change on the same items is rejected/skipped instead of racing the transfer), then
     /// waits for any of their paths still queued for an XMP write before actually running.
-    fn accept_batch(self: &Rc<Self>, jobs: Vec<(ItemId, Vec<PathBuf>)>, dest: PathBuf, kind: OpKind, policy: ConflictPolicy) {
+    fn accept_batch(
+        self: &Rc<Self>,
+        jobs: Vec<(ItemId, Vec<PathBuf>)>,
+        dest: PathBuf,
+        kind: OpKind,
+        policy: ConflictPolicy,
+    ) {
         {
             let mut transferring = self.transferring.borrow_mut();
             for (id, _) in &jobs {
@@ -1147,13 +1302,24 @@ impl AppState {
     /// rating just applied hasn't been written to the sidecar yet: moving/copying before
     /// the write lands can either leave the rating out of the transferred sidecar or let
     /// the writer recreate an orphaned sidecar at the old (now-vacated) path.
-    fn wait_then_run(self: &Rc<Self>, jobs: Vec<(ItemId, Vec<PathBuf>)>, dest: PathBuf, kind: OpKind, policy: ConflictPolicy) {
+    fn wait_then_run(
+        self: &Rc<Self>,
+        jobs: Vec<(ItemId, Vec<PathBuf>)>,
+        dest: PathBuf,
+        kind: OpKind,
+        policy: ConflictPolicy,
+    ) {
         if batch_ready(&jobs, &self.xmp_inflight.borrow()) {
             self.run_transfer(jobs, dest, kind, policy);
             return;
         }
         let s = self.clone();
-        let pending = RefCell::new(Some(PendingBatch { jobs, dest, kind, policy }));
+        let pending = RefCell::new(Some(PendingBatch {
+            jobs,
+            dest,
+            kind,
+            policy,
+        }));
         glib::timeout_add_local(Duration::from_millis(50), move || {
             let ready = pending
                 .borrow()
@@ -1176,15 +1342,25 @@ impl AppState {
         kind: OpKind,
         policy: ConflictPolicy,
     ) {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
         let _ = self.index.borrow().add_recent_destination(&dest, now);
-        self.viewer_resume
-            .set(if self.viewer_active() { self.current_position() } else { None });
+        self.viewer_resume.set(if self.viewer_active() {
+            self.current_position()
+        } else {
+            None
+        });
         let verb = match kind {
             OpKind::Move => "Moving",
             OpKind::Copy => "Copying",
         };
-        self.toast(&format!("{verb} {} item{}…", jobs.len(), if jobs.len() == 1 { "" } else { "s" }));
+        self.toast(&format!(
+            "{verb} {} item{}…",
+            jobs.len(),
+            if jobs.len() == 1 { "" } else { "s" }
+        ));
         let tx = self.tx.clone();
         std::thread::Builder::new()
             .name("pb-fileops".into())
@@ -1221,8 +1397,13 @@ impl AppState {
     fn on_transferred(&self, id: ItemId, kind: OpKind, outcome: TransferOutcome) {
         // Every outcome (Done, Skipped, Failed) ends this item's part of the batch.
         self.transferring.borrow_mut().remove(&id);
-        let TransferOutcome::Done(pairs) = outcome else { return };
-        let media: Vec<&(PathBuf, PathBuf)> = pairs.iter().filter(|(src, _)| !xmp::is_sidecar(src)).collect();
+        let TransferOutcome::Done(pairs) = outcome else {
+            return;
+        };
+        let media: Vec<&(PathBuf, PathBuf)> = pairs
+            .iter()
+            .filter(|(src, _)| !xmp::is_sidecar(src))
+            .collect();
         match kind {
             OpKind::Move => {
                 {
@@ -1286,8 +1467,14 @@ impl AppState {
             OpKind::Move => "Moved",
             OpKind::Copy => "Copied",
         };
-        let name = dest.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let mut text = format!("{verb} {done} item{} to “{name}”", if done == 1 { "" } else { "s" });
+        let name = dest
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let mut text = format!(
+            "{verb} {done} item{} to “{name}”",
+            if done == 1 { "" } else { "s" }
+        );
         if skipped > 0 {
             text.push_str(&format!(", {skipped} skipped"));
         }

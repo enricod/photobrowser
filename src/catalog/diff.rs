@@ -33,7 +33,10 @@ pub fn diff_items(old: &[Item], new: Vec<Item>, mut alloc_id: impl FnMut() -> It
                 item.id = old_item.id;
                 if item != **old_item {
                     let display_changed = item.display_file() != old_item.display_file();
-                    diff.updated.push(ItemUpdate { item, display_changed });
+                    diff.updated.push(ItemUpdate {
+                        item,
+                        display_changed,
+                    });
                 }
             }
             None => {
@@ -42,7 +45,11 @@ pub fn diff_items(old: &[Item], new: Vec<Item>, mut alloc_id: impl FnMut() -> It
             }
         }
     }
-    diff.removed = old.iter().filter(|i| !seen.contains(&i.id)).map(|i| i.id).collect();
+    diff.removed = old
+        .iter()
+        .filter(|i| !seen.contains(&i.id))
+        .map(|i| i.id)
+        .collect();
     diff
 }
 

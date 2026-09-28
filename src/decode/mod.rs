@@ -5,7 +5,7 @@ pub mod raw;
 
 use std::fs;
 use std::io;
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 
 use crate::media::{FileKind, MediaFile};
@@ -29,11 +29,18 @@ pub enum DecodeError {
 }
 
 /// Decodes `file` for display: long edge ≤ `max_edge` (0 = native), upright.
-pub fn decode_for_display(file: &MediaFile, max_edge: u32, quality: Quality) -> Result<Rgba, DecodeError> {
+pub fn decode_for_display(
+    file: &MediaFile,
+    max_edge: u32,
+    quality: Quality,
+) -> Result<Rgba, DecodeError> {
     let (img, orientation) = match file.kind {
         FileKind::Jpeg => {
             let data = fs::read(&file.path)?;
-            (jpeg::decode_jpeg(&data, max_edge)?, orientation_of_buffer(&data))
+            (
+                jpeg::decode_jpeg(&data, max_edge)?,
+                orientation_of_buffer(&data),
+            )
         }
         FileKind::Png | FileKind::Tiff => (
             generic::decode_with_image_crate(&file.path)?,
@@ -84,7 +91,12 @@ mod tests {
 
     fn media(path: PathBuf) -> MediaFile {
         let kind = FileKind::from_path(&path).unwrap();
-        MediaFile { path, kind, size: 0, mtime_ns: 0 }
+        MediaFile {
+            path,
+            kind,
+            size: 0,
+            mtime_ns: 0,
+        }
     }
 
     #[test]
@@ -107,7 +119,10 @@ mod tests {
         let top = img.pixel(16, 4);
         let bottom = img.pixel(16, 60);
         assert!(top[0] > 200 && top[1] < 80, "top should be red: {top:?}");
-        assert!(bottom[1] > 200 && bottom[0] < 80, "bottom should be green: {bottom:?}");
+        assert!(
+            bottom[1] > 200 && bottom[0] < 80,
+            "bottom should be green: {bottom:?}"
+        );
     }
 
     #[test]

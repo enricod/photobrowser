@@ -17,7 +17,10 @@ pub fn choose_destination(state: &Rc<AppState>, kind: OpKind) {
         OpKind::Move => "Move to Folder",
         OpKind::Copy => "Copy to Folder",
     };
-    let dialog = adw::Dialog::builder().title(title).content_width(460).build();
+    let dialog = adw::Dialog::builder()
+        .title(title)
+        .content_width(460)
+        .build();
     let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
     content.set_margin_top(12);
     content.set_margin_bottom(18);
@@ -33,7 +36,10 @@ pub fn choose_destination(state: &Rc<AppState>, kind: OpKind) {
         .filter(|d| d.is_dir() && Some(d) != state.folder().as_ref())
         .collect();
     if !recent.is_empty() {
-        let heading = gtk::Label::builder().label("Recent folders").xalign(0.0).build();
+        let heading = gtk::Label::builder()
+            .label("Recent folders")
+            .xalign(0.0)
+            .build();
         heading.add_css_class("heading");
         let list = gtk::ListBox::new();
         list.add_css_class("boxed-list");
@@ -69,11 +75,15 @@ pub fn choose_destination(state: &Rc<AppState>, kind: OpKind) {
         let chooser = gtk::FileDialog::builder().title(title).modal(true).build();
         let s2 = s.clone();
         let t = targets.clone();
-        chooser.select_folder(Some(&s.widgets().window), gio::Cancellable::NONE, move |res| {
-            if let Some(path) = res.ok().and_then(|f| f.path()) {
-                s2.start_transfer(t, path, kind);
-            }
-        });
+        chooser.select_folder(
+            Some(&s.widgets().window),
+            gio::Cancellable::NONE,
+            move |res| {
+                if let Some(path) = res.ok().and_then(|f| f.path()) {
+                    s2.start_transfer(t, path, kind);
+                }
+            },
+        );
     });
     content.append(&choose);
 

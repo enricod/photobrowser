@@ -10,13 +10,26 @@ pub struct Rgba {
 
 impl Rgba {
     pub fn new(width: u32, height: u32, data: Vec<u8>) -> Rgba {
-        assert_eq!(data.len(), width as usize * height as usize * 4, "RGBA buffer size");
-        Rgba { width, height, data }
+        assert_eq!(
+            data.len(),
+            width as usize * height as usize * 4,
+            "RGBA buffer size"
+        );
+        Rgba {
+            width,
+            height,
+            data,
+        }
     }
 
     pub fn pixel(&self, x: u32, y: u32) -> [u8; 4] {
         let i = (y as usize * self.width as usize + x as usize) * 4;
-        [self.data[i], self.data[i + 1], self.data[i + 2], self.data[i + 3]]
+        [
+            self.data[i],
+            self.data[i + 1],
+            self.data[i + 2],
+            self.data[i + 3],
+        ]
     }
 
     pub fn long_edge(&self) -> u32 {
@@ -37,7 +50,8 @@ pub fn fit_within(width: u32, height: u32, max_edge: u32) -> (u32, u32) {
     if max_edge == 0 || width.max(height) <= max_edge {
         return (width, height);
     }
-    let scale = |short: u32, long: u32| ((short as u64 * max_edge as u64) / long as u64).max(1) as u32;
+    let scale =
+        |short: u32, long: u32| ((short as u64 * max_edge as u64) / long as u64).max(1) as u32;
     if width >= height {
         (max_edge, scale(height, width))
     } else {

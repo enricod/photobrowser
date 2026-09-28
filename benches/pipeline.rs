@@ -1,20 +1,27 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use photobrowser::catalog::sync::scan_folder;
-use photobrowser::decode::{decode_for_display, Quality, THUMB_EDGE};
+use photobrowser::decode::{Quality, THUMB_EDGE, decode_for_display};
 use photobrowser::media::{FileKind, MediaFile};
 
 fn write_gradient(path: &Path, w: u32, h: u32) {
-    image::RgbImage::from_fn(w, h, |x, y| image::Rgb([(x % 256) as u8, (y % 256) as u8, 128]))
-        .save(path)
-        .unwrap();
+    image::RgbImage::from_fn(w, h, |x, y| {
+        image::Rgb([(x % 256) as u8, (y % 256) as u8, 128])
+    })
+    .save(path)
+    .unwrap();
 }
 
 fn media(path: PathBuf) -> MediaFile {
     let kind = FileKind::from_path(&path).unwrap();
-    MediaFile { path, kind, size: 0, mtime_ns: 0 }
+    MediaFile {
+        path,
+        kind,
+        size: 0,
+        mtime_ns: 0,
+    }
 }
 
 fn bench_thumbnails(c: &mut Criterion) {
@@ -55,8 +62,14 @@ fn bench_scan(c: &mut Criterion) {
         b.iter(|| scan_folder(dir.path(), &HashMap::new()).unwrap())
     });
     let first = scan_folder(dir.path(), &HashMap::new()).unwrap();
-    let known: HashMap<_, _> = first.upserts.into_iter().map(|r| (r.path.clone(), r)).collect();
-    c.bench_function("scan_2000_known", |b| b.iter(|| scan_folder(dir.path(), &known).unwrap()));
+    let known: HashMap<_, _> = first
+        .upserts
+        .into_iter()
+        .map(|r| (r.path.clone(), r))
+        .collect();
+    c.bench_function("scan_2000_known", |b| {
+        b.iter(|| scan_folder(dir.path(), &known).unwrap())
+    });
 }
 
 criterion_group! {

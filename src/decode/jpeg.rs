@@ -37,7 +37,13 @@ pub fn decode_jpeg(data: &[u8], target_edge: u32) -> Result<Rgba, DecodeError> {
     let mut pixels = vec![0u8; w * h * 4];
     d.decompress(
         data,
-        Image { pixels: pixels.as_mut_slice(), width: w, pitch: w * 4, height: h, format: PixelFormat::RGBA },
+        Image {
+            pixels: pixels.as_mut_slice(),
+            width: w,
+            pitch: w * 4,
+            height: h,
+            format: PixelFormat::RGBA,
+        },
     )
     .map_err(jerr)?;
     Ok(Rgba::new(w as u32, h as u32, pixels))
@@ -66,7 +72,12 @@ mod tests {
     #[test]
     fn decodes_at_reduced_scale() {
         let img = decode_jpeg(&sample(800, 600), 100).unwrap();
-        assert!(img.long_edge() >= 100 && img.long_edge() < 200, "{}x{}", img.width, img.height);
+        assert!(
+            img.long_edge() >= 100 && img.long_edge() < 200,
+            "{}x{}",
+            img.width,
+            img.height
+        );
     }
 
     #[test]

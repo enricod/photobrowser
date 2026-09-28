@@ -45,7 +45,12 @@ mod tests {
 
     fn mf_path(path: PathBuf) -> MediaFile {
         let kind = FileKind::from_path(&path).unwrap();
-        MediaFile { path, kind, size: 1, mtime_ns: 0 }
+        MediaFile {
+            path,
+            kind,
+            size: 1,
+            mtime_ns: 0,
+        }
     }
 
     fn names(items: &[Item]) -> Vec<String> {

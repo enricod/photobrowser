@@ -33,7 +33,12 @@ pub fn handle(state: &Rc<AppState>, key: gdk::Key, mods: gdk::ModifierType) -> g
     handle_common(state, ctrl, shift, ch)
 }
 
-fn handle_common(state: &Rc<AppState>, ctrl: bool, shift: bool, ch: Option<char>) -> glib::Propagation {
+fn handle_common(
+    state: &Rc<AppState>,
+    ctrl: bool,
+    shift: bool,
+    ch: Option<char>,
+) -> glib::Propagation {
     match (ctrl, ch) {
         (true, Some('o')) => state.choose_folder(),
         (true, Some('f')) => state.focus_filters(),

@@ -59,8 +59,15 @@ pub fn scan_folder(folder: &Path, known: &HashMap<PathBuf, FileRecord>) -> io::R
         .filter(|p| !records.contains_key(*p))
         .cloned()
         .collect();
-    let upserts = changed.into_iter().filter_map(|p| records.remove(&p)).collect();
-    Ok(ScanResult { items, upserts, removed })
+    let upserts = changed
+        .into_iter()
+        .filter_map(|p| records.remove(&p))
+        .collect();
+    Ok(ScanResult {
+        items,
+        upserts,
+        removed,
+    })
 }
 
 /// Imports the sidecar's rating when it changed since the last sync.
@@ -69,7 +76,9 @@ fn import_sidecar(rec: &mut FileRecord) -> bool {
     if rec.xmp_dirty {
         return false; // a local change is waiting to be written: local wins
     }
-    let Some(mtime) = xmp::sidecar_mtime_ns(&rec.path) else { return false };
+    let Some(mtime) = xmp::sidecar_mtime_ns(&rec.path) else {
+        return false;
+    };
     if rec.xmp_synced_at.is_some_and(|t| t >= mtime) {
         return false;
     }
@@ -104,7 +113,8 @@ pub fn reconcile_item(item: &mut Item, records: &mut HashMap<PathBuf, FileRecord
     let mut changed = Vec::new();
     for f in &item.files {
         if let Some(rec) = records.get_mut(&f.path)
-            && (rec.rating != rating || rec.rejected != rejected) {
+            && (rec.rating != rating || rec.rejected != rejected)
+        {
             rec.rating = rating;
             rec.rejected = rejected;
             rec.xmp_dirty = true;
@@ -155,7 +165,11 @@ mod tests {
     }
 
     fn known_from(result: &ScanResult) -> HashMap<PathBuf, FileRecord> {
-        result.upserts.iter().map(|r| (r.path.clone(), r.clone())).collect()
+        result
+            .upserts
+            .iter()
+            .map(|r| (r.path.clone(), r.clone()))
+            .collect()
     }
 
     #[test]
@@ -240,7 +254,10 @@ mod tests {
         known.get_mut(&a).unwrap().rating = 3;
         xmp::write_rating(&a, 0, true).unwrap();
         let second = scan_folder(dir.path(), &known).unwrap();
-        assert_eq!((second.items[0].rating, second.items[0].rejected), (3, true));
+        assert_eq!(
+            (second.items[0].rating, second.items[0].rejected),
+            (3, true)
+        );
     }
 
     #[test]

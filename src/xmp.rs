@@ -39,7 +39,8 @@ pub fn sidecar_path(file: &Path) -> PathBuf {
 }
 
 pub fn is_sidecar(path: &Path) -> bool {
-    path.extension().is_some_and(|e| e.eq_ignore_ascii_case("xmp"))
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("xmp"))
 }
 
 pub fn to_xmp_value(rating: u8, rejected: bool) -> i32 {
@@ -47,7 +48,11 @@ pub fn to_xmp_value(rating: u8, rejected: bool) -> i32 {
 }
 
 pub fn from_xmp_value(v: i32) -> XmpRating {
-    if v < 0 { XmpRating::Rejected } else { XmpRating::Stars(v.min(5) as u8) }
+    if v < 0 {
+        XmpRating::Rejected
+    } else {
+        XmpRating::Stars(v.min(5) as u8)
+    }
 }
 
 pub fn sidecar_mtime_ns(file: &Path) -> Option<i64> {
@@ -95,7 +100,10 @@ mod tests {
 
     #[test]
     fn sidecar_path_appends_xmp() {
-        assert_eq!(sidecar_path(Path::new("/p/IMG_1.CR3")), PathBuf::from("/p/IMG_1.CR3.xmp"));
+        assert_eq!(
+            sidecar_path(Path::new("/p/IMG_1.CR3")),
+            PathBuf::from("/p/IMG_1.CR3.xmp")
+        );
         assert!(is_sidecar(Path::new("/p/IMG_1.CR3.xmp")));
         assert!(!is_sidecar(Path::new("/p/IMG_1.CR3")));
     }
@@ -146,11 +154,20 @@ mod tests {
 
         assert_eq!(read_rating(&file).unwrap(), Some(XmpRating::Stars(5)));
         let meta = exif::open_path(&sidecar_path(&file)).unwrap();
-        assert_eq!(meta.get_tag_string("Xmp.darktable.history_end").unwrap(), "1");
-        assert_eq!(meta.get_tag_string("Xmp.xmpMM.DerivedFrom").unwrap(), "IMG_0001.CR3");
+        assert_eq!(
+            meta.get_tag_string("Xmp.darktable.history_end").unwrap(),
+            "1"
+        );
+        assert_eq!(
+            meta.get_tag_string("Xmp.xmpMM.DerivedFrom").unwrap(),
+            "IMG_0001.CR3"
+        );
         let content = fs::read_to_string(sidecar_path(&file)).unwrap();
         assert!(content.contains("exposure"), "history lost:\n{content}");
-        assert!(content.contains("gz02eJxjYIAAAAAIAAE="), "params lost:\n{content}");
+        assert!(
+            content.contains("gz02eJxjYIAAAAAIAAE="),
+            "params lost:\n{content}"
+        );
     }
 
     #[test]
@@ -178,7 +195,10 @@ mod tests {
         fs::write(sidecar_path(&file), b"definitely not xmp").unwrap();
         assert!(read_rating(&file).is_err());
         assert!(write_rating(&file, 2, false).is_err());
-        assert_eq!(fs::read(sidecar_path(&file)).unwrap(), b"definitely not xmp");
+        assert_eq!(
+            fs::read(sidecar_path(&file)).unwrap(),
+            b"definitely not xmp"
+        );
     }
 
     /// Regression: exiv2's XMP encode (save) deletes and re-registers every custom
@@ -200,7 +220,10 @@ mod tests {
                         } else {
                             write_rating(&file, 4, false).unwrap();
                             let content = fs::read_to_string(sidecar_path(&file)).unwrap();
-                            assert!(content.contains("gz02eJxjYIAAAAAIAAE="), "history lost:\n{content}");
+                            assert!(
+                                content.contains("gz02eJxjYIAAAAAIAAE="),
+                                "history lost:\n{content}"
+                            );
                         }
                     }
                 })

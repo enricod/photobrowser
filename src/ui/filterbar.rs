@@ -6,7 +6,8 @@ use super::state::AppState;
 use crate::filter::{RejectFilter, SortKey, SortState, TypeFilter};
 
 pub fn build(state: &Rc<AppState>) -> gtk::Box {
-    let rating = gtk::DropDown::from_strings(&["All ratings", "★ 1+", "★ 2+", "★ 3+", "★ 4+", "★ 5"]);
+    let rating =
+        gtk::DropDown::from_strings(&["All ratings", "★ 1+", "★ 2+", "★ 3+", "★ 4+", "★ 5"]);
     rating.set_tooltip_text(Some("Minimum rating"));
     let reject = gtk::DropDown::from_strings(&["Show rejects", "Hide rejects", "Only rejects"]);
     reject.set_selected(1);

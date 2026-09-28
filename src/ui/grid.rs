@@ -22,7 +22,11 @@ pub fn thumb_factory(state: &Rc<AppState>, compact: bool) -> gtk::SignalListItem
             .content_fit(gtk::ContentFit::Contain)
             .can_shrink(true)
             .build();
-        picture.add_css_class(if compact { "pb-strip-thumb" } else { "pb-thumb" });
+        picture.add_css_class(if compact {
+            "pb-strip-thumb"
+        } else {
+            "pb-thumb"
+        });
 
         let broken = gtk::Image::from_icon_name("image-missing-symbolic");
         broken.set_pixel_size(48);
@@ -55,14 +59,24 @@ pub fn thumb_factory(state: &Rc<AppState>, compact: bool) -> gtk::SignalListItem
         cell.append(&stars);
 
         let item = li.property_expression("item");
-        item.chain_property::<ItemObject>("thumbnail").bind(&picture, "paintable", gtk::Widget::NONE);
-        item.chain_property::<ItemObject>("has-error").bind(&broken, "visible", gtk::Widget::NONE);
-        item.chain_property::<ItemObject>("error").bind(&broken, "tooltip-text", gtk::Widget::NONE);
-        item.chain_property::<ItemObject>("is-pair").bind(&badge, "visible", gtk::Widget::NONE);
-        item.chain_property::<ItemObject>("rejected").bind(&reject, "visible", gtk::Widget::NONE);
-        item.chain_property::<ItemObject>("name").bind(&cell, "tooltip-text", gtk::Widget::NONE);
+        item.chain_property::<ItemObject>("thumbnail").bind(
+            &picture,
+            "paintable",
+            gtk::Widget::NONE,
+        );
+        item.chain_property::<ItemObject>("has-error")
+            .bind(&broken, "visible", gtk::Widget::NONE);
+        item.chain_property::<ItemObject>("error")
+            .bind(&broken, "tooltip-text", gtk::Widget::NONE);
+        item.chain_property::<ItemObject>("is-pair")
+            .bind(&badge, "visible", gtk::Widget::NONE);
+        item.chain_property::<ItemObject>("rejected")
+            .bind(&reject, "visible", gtk::Widget::NONE);
+        item.chain_property::<ItemObject>("name")
+            .bind(&cell, "tooltip-text", gtk::Widget::NONE);
         if !compact {
-            item.chain_property::<ItemObject>("stars").bind(&stars, "label", gtk::Widget::NONE);
+            item.chain_property::<ItemObject>("stars")
+                .bind(&stars, "label", gtk::Widget::NONE);
         }
         li.set_child(Some(&cell));
     });
@@ -83,7 +97,10 @@ pub fn thumb_factory(state: &Rc<AppState>, compact: bool) -> gtk::SignalListItem
 }
 
 pub fn build(state: &Rc<AppState>) -> gtk::GridView {
-    let grid = gtk::GridView::new(Some(state.selection.clone()), Some(thumb_factory(state, false)));
+    let grid = gtk::GridView::new(
+        Some(state.selection.clone()),
+        Some(thumb_factory(state, false)),
+    );
     grid.set_max_columns(64);
     grid.set_enable_rubberband(true);
     let s = state.clone();

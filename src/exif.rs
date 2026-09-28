@@ -64,7 +64,11 @@ pub fn capture_time(path: &Path) -> Option<i64> {
     let meta = open_path(path).ok()?;
     ["Exif.Photo.DateTimeOriginal", "Exif.Image.DateTime"]
         .iter()
-        .find_map(|tag| meta.get_tag_string(tag).ok().and_then(|s| parse_exif_datetime(&s)))
+        .find_map(|tag| {
+            meta.get_tag_string(tag)
+                .ok()
+                .and_then(|s| parse_exif_datetime(&s))
+        })
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -143,8 +147,14 @@ mod tests {
 
     #[test]
     fn parses_exif_datetime() {
-        assert_eq!(parse_exif_datetime("2026:09:01 10:15:30"), Some(1_788_257_730));
-        assert_eq!(parse_exif_datetime("2026:09:01 10:15:30\0"), Some(1_788_257_730));
+        assert_eq!(
+            parse_exif_datetime("2026:09:01 10:15:30"),
+            Some(1_788_257_730)
+        );
+        assert_eq!(
+            parse_exif_datetime("2026:09:01 10:15:30\0"),
+            Some(1_788_257_730)
+        );
         assert_eq!(parse_exif_datetime("garbage"), None);
         assert_eq!(parse_exif_datetime("0000:00:00 00:00:00"), None);
     }

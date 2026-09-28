@@ -2,7 +2,9 @@ use std::path::{Path, PathBuf};
 
 pub type ItemId = u64;
 
-const RAW_EXTS: &[&str] = &["cr2", "cr3", "nef", "arw", "raf", "orf", "rw2", "dng", "pef", "srw"];
+const RAW_EXTS: &[&str] = &[
+    "cr2", "cr3", "nef", "arw", "raf", "orf", "rw2", "dng", "pef", "srw",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FileKind {
@@ -124,10 +126,19 @@ mod tests {
 
     #[test]
     fn classifies_extensions() {
-        assert_eq!(FileKind::from_path(Path::new("a.JPG")), Some(FileKind::Jpeg));
-        assert_eq!(FileKind::from_path(Path::new("a.jpeg")), Some(FileKind::Jpeg));
+        assert_eq!(
+            FileKind::from_path(Path::new("a.JPG")),
+            Some(FileKind::Jpeg)
+        );
+        assert_eq!(
+            FileKind::from_path(Path::new("a.jpeg")),
+            Some(FileKind::Jpeg)
+        );
         assert_eq!(FileKind::from_path(Path::new("a.png")), Some(FileKind::Png));
-        assert_eq!(FileKind::from_path(Path::new("a.TIFF")), Some(FileKind::Tiff));
+        assert_eq!(
+            FileKind::from_path(Path::new("a.TIFF")),
+            Some(FileKind::Tiff)
+        );
         assert_eq!(FileKind::from_path(Path::new("a.NEF")), Some(FileKind::Raw));
         assert_eq!(FileKind::from_path(Path::new("a.cr3")), Some(FileKind::Raw));
         assert_eq!(FileKind::from_path(Path::new("a.txt")), None);

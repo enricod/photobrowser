@@ -112,21 +112,32 @@ mod tests {
 
     #[test]
     fn min_rating_filters() {
-        let f = FilterState { min_rating: 3, ..Default::default() };
+        let f = FilterState {
+            min_rating: 3,
+            ..Default::default()
+        };
         assert!(!f.matches(&item(&["/p/a.jpg"], 2, false)));
         assert!(f.matches(&item(&["/p/a.jpg"], 3, false)));
     }
 
     #[test]
     fn only_rejects_ignores_min_rating() {
-        let f = FilterState { min_rating: 5, reject: RejectFilter::OnlyRejects, ..Default::default() };
+        let f = FilterState {
+            min_rating: 5,
+            reject: RejectFilter::OnlyRejects,
+            ..Default::default()
+        };
         assert!(f.matches(&item(&["/p/a.jpg"], 0, true)));
         assert!(!f.matches(&item(&["/p/a.jpg"], 5, false)));
     }
 
     #[test]
     fn show_all_includes_rejects() {
-        let f = FilterState { min_rating: 4, reject: RejectFilter::ShowAll, ..Default::default() };
+        let f = FilterState {
+            min_rating: 4,
+            reject: RejectFilter::ShowAll,
+            ..Default::default()
+        };
         assert!(f.matches(&item(&["/p/a.jpg"], 0, true)));
         assert!(!f.matches(&item(&["/p/a.jpg"], 1, false)));
     }
@@ -135,9 +146,18 @@ mod tests {
     fn type_filters_match_pairs_by_member() {
         let pair = item(&["/p/a.CR3", "/p/a.JPG"], 0, false);
         let png = item(&["/p/b.png"], 0, false);
-        let raw = FilterState { kind: TypeFilter::Raw, ..Default::default() };
-        let jpeg = FilterState { kind: TypeFilter::Jpeg, ..Default::default() };
-        let other = FilterState { kind: TypeFilter::Other, ..Default::default() };
+        let raw = FilterState {
+            kind: TypeFilter::Raw,
+            ..Default::default()
+        };
+        let jpeg = FilterState {
+            kind: TypeFilter::Jpeg,
+            ..Default::default()
+        };
+        let other = FilterState {
+            kind: TypeFilter::Other,
+            ..Default::default()
+        };
         assert!(raw.matches(&pair) && jpeg.matches(&pair) && !other.matches(&pair));
         assert!(!raw.matches(&png) && !jpeg.matches(&png) && other.matches(&png));
     }
@@ -146,7 +166,10 @@ mod tests {
     fn pinned_items_bypass_filters() {
         let mut i = item(&["/p/a.jpg"], 1, true);
         i.id = 7;
-        let mut f = FilterState { min_rating: 5, ..Default::default() };
+        let mut f = FilterState {
+            min_rating: 5,
+            ..Default::default()
+        };
         assert!(!f.matches(&i));
         f.pinned.insert(7);
         assert!(f.matches(&i));
@@ -168,8 +191,14 @@ mod tests {
     fn filename_sort_is_case_insensitive_and_reversible() {
         let a = item(&["/p/B.jpg"], 0, false);
         let b = item(&["/p/a.jpg"], 0, false);
-        let asc = SortState { key: SortKey::FileName, descending: false };
-        let desc = SortState { key: SortKey::FileName, descending: true };
+        let asc = SortState {
+            key: SortKey::FileName,
+            descending: false,
+        };
+        let desc = SortState {
+            key: SortKey::FileName,
+            descending: true,
+        };
         assert_eq!(compare(&a, &b, asc), Ordering::Greater);
         assert_eq!(compare(&a, &b, desc), Ordering::Less);
     }

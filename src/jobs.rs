@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -81,7 +81,11 @@ pub struct JobPool {
 impl JobPool {
     pub fn new(threads: usize) -> JobPool {
         let shared = Arc::new(Shared {
-            queue: Mutex::new(Queue { heap: BinaryHeap::new(), next_seq: 0, shutdown: false }),
+            queue: Mutex::new(Queue {
+                heap: BinaryHeap::new(),
+                next_seq: 0,
+                shutdown: false,
+            }),
             ready: Condvar::new(),
         });
         let workers = (0..threads.max(1))
@@ -103,11 +107,21 @@ impl JobPool {
             .unwrap_or(1)
     }
 
-    pub fn submit(&self, priority: Priority, token: CancelToken, work: impl FnOnce() + Send + 'static) {
+    pub fn submit(
+        &self,
+        priority: Priority,
+        token: CancelToken,
+        work: impl FnOnce() + Send + 'static,
+    ) {
         let mut q = self.shared.queue.lock().unwrap();
         let seq = q.next_seq;
         q.next_seq += 1;
-        q.heap.push(Job { priority, seq, token, work: Box::new(work) });
+        q.heap.push(Job {
+            priority,
+            seq,
+            token,
+            work: Box::new(work),
+        });
         drop(q);
         self.shared.ready.notify_one();
     }
@@ -186,7 +200,9 @@ mod tests {
             pool.submit(p, CancelToken::new(), move || tx.send(name).unwrap());
         }
         release.send(()).unwrap();
-        let order: Vec<_> = (0..5).map(|_| rx.recv_timeout(Duration::from_secs(5)).unwrap()).collect();
+        let order: Vec<_> = (0..5)
+            .map(|_| rx.recv_timeout(Duration::from_secs(5)).unwrap())
+            .collect();
         assert_eq!(order, ["cur", "vis1", "vis2", "pre", "bg"]);
     }
 
@@ -197,8 +213,12 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let token = CancelToken::new();
         let tx1 = tx.clone();
-        pool.submit(Priority::Visible, token.clone(), move || tx1.send("cancelled").unwrap());
-        pool.submit(Priority::Background, CancelToken::new(), move || tx.send("kept").unwrap());
+        pool.submit(Priority::Visible, token.clone(), move || {
+            tx1.send("cancelled").unwrap()
+        });
+        pool.submit(Priority::Background, CancelToken::new(), move || {
+            tx.send("kept").unwrap()
+        });
         token.cancel();
         release.send(()).unwrap();
         assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), "kept");
@@ -210,7 +230,9 @@ mod tests {
         let pool = JobPool::new(1);
         let (tx, rx) = mpsc::channel();
         pool.submit(Priority::Visible, CancelToken::new(), || panic!("boom"));
-        pool.submit(Priority::Background, CancelToken::new(), move || tx.send(1).unwrap());
+        pool.submit(Priority::Background, CancelToken::new(), move || {
+            tx.send(1).unwrap()
+        });
         assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), 1);
     }
 
@@ -219,7 +241,9 @@ mod tests {
         let pool = JobPool::new(1);
         let release = block_worker(&pool);
         let (tx, rx) = mpsc::channel::<()>();
-        pool.submit(Priority::Visible, CancelToken::new(), move || tx.send(()).unwrap());
+        pool.submit(Priority::Visible, CancelToken::new(), move || {
+            tx.send(()).unwrap()
+        });
         assert_eq!(pool.queued(), 1);
         pool.clear();
         assert_eq!(pool.queued(), 0);

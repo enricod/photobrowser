@@ -72,7 +72,10 @@ mod tests {
     #[test]
     fn missing_or_garbage_file_gives_defaults() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(Config::load_from(&dir.path().join("none.toml")), Config::default());
+        assert_eq!(
+            Config::load_from(&dir.path().join("none.toml")),
+            Config::default()
+        );
         let bad = dir.path().join("bad.toml");
         fs::write(&bad, "this is = = not toml").unwrap();
         assert_eq!(Config::load_from(&bad), Config::default());

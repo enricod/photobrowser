@@ -73,7 +73,15 @@ pub fn build(app: &adw::Application, start_folder: Option<PathBuf>) {
     toolbar.set_content(Some(&toasts));
     window.set_content(Some(&toolbar));
 
-    let _ = state.widgets.set(Widgets { window: window.clone(), toasts, stack, grid, counter, filters, viewer });
+    let _ = state.widgets.set(Widgets {
+        window: window.clone(),
+        toasts,
+        stack,
+        grid,
+        counter,
+        filters,
+        viewer,
+    });
 
     let s = state.clone();
     let preferences = gio::ActionEntry::builder("preferences")
@@ -86,7 +94,9 @@ pub fn build(app: &adw::Application, start_folder: Option<PathBuf>) {
         button.connect_clicked(move |_| s.choose_folder());
     }
     let s = state.clone();
-    state.selection.connect_items_changed(move |_, _, _, _| s.update_counter());
+    state
+        .selection
+        .connect_items_changed(move |_, _, _, _| s.update_counter());
 
     let s = state.clone();
     state.selection.connect_selection_changed(move |_, _, _| {
@@ -99,7 +109,10 @@ pub fn build(app: &adw::Application, start_folder: Option<PathBuf>) {
     let s = state.clone();
     let scroll_accum = Cell::new(0.0_f64);
     scroll.connect_scroll(move |ctl, _dx, dy| {
-        if !ctl.current_event_state().contains(gtk::gdk::ModifierType::CONTROL_MASK) {
+        if !ctl
+            .current_event_state()
+            .contains(gtk::gdk::ModifierType::CONTROL_MASK)
+        {
             scroll_accum.set(0.0);
             return glib::Propagation::Proceed;
         }

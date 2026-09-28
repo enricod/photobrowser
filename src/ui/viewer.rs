@@ -1,11 +1,11 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use gtk::prelude::*;
 use gtk::gdk;
+use gtk::prelude::*;
 
 use super::grid::thumb_factory;
-use super::item_object::{stars_text, ItemObject};
+use super::item_object::{ItemObject, stars_text};
 use super::state::{AppState, Zoom};
 use crate::exif::ExifInfo;
 use crate::media::{Item, ItemId};
@@ -53,9 +53,12 @@ impl Viewer {
             .vexpand(true)
             .build();
 
-        let strip = gtk::ListView::new(Some(state.selection.clone()), Some(thumb_factory(state, true)));
+        let strip = gtk::ListView::new(
+            Some(state.selection.clone()),
+            Some(thumb_factory(state, true)),
+        );
         strip.set_orientation(gtk::Orientation::Horizontal);
-            let strip_scroller = gtk::ScrolledWindow::builder()
+        let strip_scroller = gtk::ScrolledWindow::builder()
             .child(&strip)
             .vscrollbar_policy(gtk::PolicyType::Never)
             .min_content_height(96)
@@ -107,8 +110,10 @@ impl Viewer {
         let v = Rc::downgrade(&viewer);
         drag.connect_drag_begin(move |_, _, _| {
             if let Some(v) = v.upgrade() {
-                v.drag_origin
-                    .set((v.scroller.hadjustment().value(), v.scroller.vadjustment().value()));
+                v.drag_origin.set((
+                    v.scroller.hadjustment().value(),
+                    v.scroller.vadjustment().value(),
+                ));
             }
         });
         let v = Rc::downgrade(&viewer);
@@ -207,8 +212,17 @@ mod tests {
 
     #[test]
     fn info_appends_exif_summary() {
-        let exif = ExifInfo { iso: Some(200), ..Default::default() };
-        assert_eq!(info_text(&item(1, false), Some(&exif)), "IMG_1.JPG\n★☆☆☆☆\nISO 200");
-        assert_eq!(info_text(&item(1, false), Some(&ExifInfo::default())), "IMG_1.JPG\n★☆☆☆☆");
+        let exif = ExifInfo {
+            iso: Some(200),
+            ..Default::default()
+        };
+        assert_eq!(
+            info_text(&item(1, false), Some(&exif)),
+            "IMG_1.JPG\n★☆☆☆☆\nISO 200"
+        );
+        assert_eq!(
+            info_text(&item(1, false), Some(&ExifInfo::default())),
+            "IMG_1.JPG\n★☆☆☆☆"
+        );
     }
 }

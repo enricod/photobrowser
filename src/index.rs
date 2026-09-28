@@ -3,7 +3,7 @@ use std::ffi::OsString;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::media::MediaFile;
 
@@ -68,7 +68,8 @@ CREATE TABLE IF NOT EXISTS recent_destinations (path BLOB PRIMARY KEY, used_at I
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 ";
 
-const COLUMNS: &str = "path, size, mtime_ns, capture_time, rating, rejected, xmp_synced_at, xmp_dirty";
+const COLUMNS: &str =
+    "path, size, mtime_ns, capture_time, rating, rejected, xmp_synced_at, xmp_dirty";
 
 const UPSERT: &str = "
 INSERT INTO files (path, folder, size, mtime_ns, capture_time, rating, rejected, xmp_synced_at, xmp_dirty)
@@ -175,7 +176,11 @@ impl Index {
     fn init(conn: Connection) -> Result<Index> {
         conn.execute_batch(SCHEMA)?;
         let version: Option<String> = conn
-            .query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |r| r.get(0))
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |r| r.get(0),
+            )
             .optional()?;
         match version.as_deref() {
             None => {
@@ -272,8 +277,10 @@ impl Index {
     }
 
     pub fn mark_xmp_dirty(&self, path: &Path) -> Result<()> {
-        self.conn
-            .execute("UPDATE files SET xmp_dirty = 1 WHERE path = ?1", [bytes(path)])?;
+        self.conn.execute(
+            "UPDATE files SET xmp_dirty = 1 WHERE path = ?1",
+            [bytes(path)],
+        )?;
         Ok(())
     }
 
@@ -333,7 +340,12 @@ mod tests {
     }
 
     fn media(p: &str) -> MediaFile {
-        MediaFile { path: PathBuf::from(p), kind: FileKind::Jpeg, size: 10, mtime_ns: 100 }
+        MediaFile {
+            path: PathBuf::from(p),
+            kind: FileKind::Jpeg,
+            size: 10,
+            mtime_ns: 100,
+        }
     }
 
     #[test]
@@ -342,7 +354,8 @@ mod tests {
         let mut a = rec("/p/a.jpg");
         a.capture_time = Some(1234);
         a.rating = 3;
-        idx.upsert_many(&[a.clone(), rec("/p/sub/b.jpg"), rec("/q/c.jpg")]).unwrap();
+        idx.upsert_many(&[a.clone(), rec("/p/sub/b.jpg"), rec("/q/c.jpg")])
+            .unwrap();
         let loaded = idx.load_folder(Path::new("/p")).unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[Path::new("/p/a.jpg")], a);
@@ -367,7 +380,10 @@ mod tests {
         let idx = Index::open_in_memory().unwrap();
         idx.set_rating(&media("/p/new.jpg"), 2, true).unwrap();
         let r = idx.get(Path::new("/p/new.jpg")).unwrap().unwrap();
-        assert_eq!((r.rating, r.rejected, r.xmp_dirty, r.size), (2, true, true, 10));
+        assert_eq!(
+            (r.rating, r.rejected, r.xmp_dirty, r.size),
+            (2, true, true, 10)
+        );
     }
 
     #[test]
@@ -389,15 +405,20 @@ mod tests {
         let mut a = rec("/p/a.jpg");
         a.rating = 2;
         idx.upsert_many(&[a]).unwrap();
-        idx.rename_path(Path::new("/p/a.jpg"), Path::new("/q/a.jpg")).unwrap();
+        idx.rename_path(Path::new("/p/a.jpg"), Path::new("/q/a.jpg"))
+            .unwrap();
         assert!(idx.load_folder(Path::new("/p")).unwrap().is_empty());
-        assert_eq!(idx.load_folder(Path::new("/q")).unwrap()[Path::new("/q/a.jpg")].rating, 2);
+        assert_eq!(
+            idx.load_folder(Path::new("/q")).unwrap()[Path::new("/q/a.jpg")].rating,
+            2
+        );
     }
 
     #[test]
     fn remove_paths_deletes_rows() {
         let mut idx = Index::open_in_memory().unwrap();
-        idx.upsert_many(&[rec("/p/a.jpg"), rec("/p/b.jpg")]).unwrap();
+        idx.upsert_many(&[rec("/p/a.jpg"), rec("/p/b.jpg")])
+            .unwrap();
         idx.remove_paths(&[PathBuf::from("/p/a.jpg")]).unwrap();
         assert_eq!(idx.load_folder(Path::new("/p")).unwrap().len(), 1);
     }
@@ -406,7 +427,8 @@ mod tests {
     fn recent_destinations_order_and_cap() {
         let idx = Index::open_in_memory().unwrap();
         for i in 0..12 {
-            idx.add_recent_destination(Path::new(&format!("/d/{i}")), i).unwrap();
+            idx.add_recent_destination(Path::new(&format!("/d/{i}")), i)
+                .unwrap();
         }
         idx.add_recent_destination(Path::new("/d/3"), 100).unwrap();
         let recent = idx.recent_destinations().unwrap();
@@ -443,7 +465,8 @@ mod tests {
     fn non_utf8_path_roundtrip() {
         let mut idx = Index::open_in_memory().unwrap();
         let path = Path::new("/p").join(OsStr::from_bytes(b"\xff\xfe.jpg"));
-        idx.upsert_many(&[FileRecord::new(path.clone(), 1, 1)]).unwrap();
+        idx.upsert_many(&[FileRecord::new(path.clone(), 1, 1)])
+            .unwrap();
         let loaded = idx.load_folder(Path::new("/p")).unwrap();
         assert!(loaded.contains_key(&path));
     }
