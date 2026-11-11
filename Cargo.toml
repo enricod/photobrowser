@@ -13,7 +13,6 @@ fast_image_resize = "6.1.0"
 gtk = { version = "0.11.5", package = "gtk4", features = ["v4_12"] }
 image = { version = "0.25.10", default-features = false, features = ["png", "tiff", "jpeg"] }
 lru = "0.18.5"
-rexiv2 = "0.10.0"
 rusqlite = "0.40.2"
 serde = { version = "1.0.229", features = ["derive"] }
 thiserror = "2.0.21"

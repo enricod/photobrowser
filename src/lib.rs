@@ -4,6 +4,7 @@ pub mod decode;
 pub mod exif;
 pub mod fileops;
 pub mod filter;
+pub mod gexiv2;
 pub mod index;
 pub mod jobs;
 pub mod libraw;

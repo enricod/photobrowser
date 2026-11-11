@@ -22,7 +22,7 @@ pub enum XmpError {
     #[error("I/O: {0}")]
     Io(#[from] io::Error),
     #[error("exiv2: {0}")]
-    Exiv2(#[from] rexiv2::Rexiv2Error),
+    Exiv2(#[from] crate::gexiv2::Error),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

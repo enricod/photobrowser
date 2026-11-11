@@ -1,6 +1,8 @@
 use std::path::Path;
 use std::sync::{Once, PoisonError, RwLock};
 
+use crate::gexiv2::{self, Metadata};
+
 static INIT: Once = Once::new();
 
 /// Serialises exiv2's XMP encode against XMP decode.
@@ -16,55 +18,54 @@ static INIT: Once = Once::new();
 /// registration anyway, not the decode.
 static EXIV2_LOCK: RwLock<()> = RwLock::new(());
 
-/// Initialises exiv2 once per process. Call before any rexiv2 use.
+/// Initialises exiv2 once per process. Call before any gexiv2 use.
 pub fn init() {
     INIT.call_once(|| {
-        rexiv2::initialize().expect("failed to initialise exiv2");
-        rexiv2::set_log_level(rexiv2::LogLevel::MUTE);
-        let _ = rexiv2::register_xmp_namespace("http://darktable.sf.net/", "darktable");
+        gexiv2::initialize().expect("failed to initialise exiv2");
+        gexiv2::mute_log();
+        let _ = gexiv2::register_xmp_namespace("http://darktable.sf.net/", "darktable");
     });
 }
 
-/// Opens a file's metadata. Always use this (not `rexiv2::Metadata::new_from_path`).
-pub fn open_path(path: &Path) -> Result<rexiv2::Metadata, rexiv2::Rexiv2Error> {
+/// Opens a file's metadata. Always use this (not `Metadata::new_from_path`).
+pub fn open_path(path: &Path) -> gexiv2::Result<Metadata> {
     init();
     let _shared = EXIV2_LOCK.read().unwrap_or_else(PoisonError::into_inner);
-    rexiv2::Metadata::new_from_path(path)
+    Metadata::new_from_path(path.as_os_str())
 }
 
-/// Parses metadata from an in-memory image. Always use this (not `rexiv2::Metadata::new_from_buffer`).
-pub fn open_buffer(data: &[u8]) -> Result<rexiv2::Metadata, rexiv2::Rexiv2Error> {
+/// Parses metadata from an in-memory image. Always use this (not `Metadata::new_from_buffer`).
+pub fn open_buffer(data: &[u8]) -> gexiv2::Result<Metadata> {
     init();
     let _shared = EXIV2_LOCK.read().unwrap_or_else(PoisonError::into_inner);
-    rexiv2::Metadata::new_from_buffer(data)
+    Metadata::new_from_buffer(data)
 }
 
 /// Writes metadata back to `path`. Always use this (not `Metadata::save_to_file`).
-pub fn save(meta: &rexiv2::Metadata, path: &Path) -> Result<(), rexiv2::Rexiv2Error> {
+pub fn save(meta: &Metadata, path: &Path) -> gexiv2::Result<()> {
     init();
     let _exclusive = EXIV2_LOCK.write().unwrap_or_else(PoisonError::into_inner);
-    meta.save_to_file(path)
+    meta.save_to_file(path.as_os_str())
 }
 
 /// Data of the largest embedded JPEG preview whose long edge is at least `needed` px.
 /// Always use this (not `Metadata::get_preview_images`): preview enumeration reads
 /// through exiv2, so it holds the shared side of the lock like `open_path`.
-pub fn largest_jpeg_preview(meta: &rexiv2::Metadata, needed: u32) -> Option<Vec<u8>> {
+pub fn largest_jpeg_preview(meta: &Metadata, needed: u32) -> Option<Vec<u8>> {
     init();
     let _shared = EXIV2_LOCK.read().unwrap_or_else(PoisonError::into_inner);
-    let previews = meta.get_preview_images()?;
+    let previews = meta.get_preview_images();
     let best = previews
-        .into_iter()
+        .iter()
         .filter(|p| {
-            p.get_extension()
-                .map(|e| e.trim_start_matches('.').eq_ignore_ascii_case("jpg"))
-                .unwrap_or(false)
+            p.extension()
+                .is_some_and(|e| e.trim_start_matches('.').eq_ignore_ascii_case("jpg"))
         })
-        .max_by_key(|p| p.get_width() as u64 * p.get_height() as u64)?;
-    if best.get_width().max(best.get_height()) < needed {
+        .max_by_key(|p| p.width() as u64 * p.height() as u64)?;
+    if best.width().max(best.height()) < needed {
         return None;
     }
-    best.get_data().ok()
+    best.data().ok()
 }
 
 /// Parses EXIF "YYYY:MM:DD HH:MM:SS" as a naive timestamp (treated as UTC; used only for sorting).
@@ -76,7 +77,7 @@ pub fn parse_exif_datetime(s: &str) -> Option<i64> {
 }
 
 /// EXIF orientation 1–8 (1 when missing or invalid).
-pub fn orientation(meta: &rexiv2::Metadata) -> u8 {
+pub fn orientation(meta: &Metadata) -> u8 {
     let v = meta.get_tag_numeric("Exif.Image.Orientation");
     if (1..=8).contains(&v) { v as u8 } else { 1 }
 }
@@ -137,7 +138,7 @@ pub fn read_info(path: &Path) -> ExifInfo {
         lens: s("Exif.Photo.LensModel"),
         exposure: meta
             .get_exposure_time()
-            .map(|r| format_exposure(*r.numer(), *r.denom())),
+            .map(|(num, den)| format_exposure(num, den)),
         aperture: meta.get_fnumber(),
         iso: meta.get_iso_speed(),
         focal_length: meta.get_focal_length(),
@@ -249,10 +250,10 @@ mod tests {
                 walk(&root.join(dir), &mut files);
             }
         }
-        let exif_rs = root.join("src/exif.rs");
+        let allowed = [root.join("src/exif.rs"), root.join("src/gexiv2.rs")];
         let offenders: Vec<String> = files
             .iter()
-            .filter(|f| **f != exif_rs)
+            .filter(|f| !allowed.contains(f))
             .flat_map(|f| {
                 let text = std::fs::read_to_string(f).unwrap();
                 FORBIDDEN

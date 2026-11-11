@@ -6,9 +6,24 @@ as one image. Ratings are written to darktable-compatible XMP sidecars.
 
 ## Build
 
+Fedora:
+
 ```bash
 sudo dnf install -y rust cargo gtk4-devel libadwaita-devel LibRaw-devel \
   libgexiv2_0.14-devel turbojpeg-devel sqlite-devel clang-devel
+```
+
+Debian / Ubuntu (Rust from [rustup](https://rustup.rs)):
+
+```bash
+sudo apt install -y pkg-config clang libclang-dev libgtk-4-dev libadwaita-1-dev \
+  libraw-dev libgexiv2-dev libturbojpeg0-dev libsqlite3-dev
+```
+
+Either gexiv2 0.14 (`gexiv2`) or 0.16 (`gexiv2-0.16`) works; `build.rs` picks
+whichever is installed. Then:
+
+```bash
 cargo build --release
 ./target/release/photobrowser [FOLDER]
 ```
