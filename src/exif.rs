@@ -79,13 +79,19 @@ pub fn largest_jpeg_preview(meta: &Metadata, needed: u32) -> Option<Vec<u8>> {
         .iter()
         .filter(|p| {
             p.extension()
-                .is_some_and(|e| e.trim_start_matches('.').eq_ignore_ascii_case("jpg"))
+                .is_some_and(|e| is_jpeg_extension(e.to_bytes()))
         })
         .max_by_key(|p| p.width() as u64 * p.height() as u64)?;
     if best.width().max(best.height()) < needed {
         return None;
     }
     best.data().ok()
+}
+
+/// True for a preview extension of "jpg", ignoring case and leading dots (exiv2 gives ".jpg").
+fn is_jpeg_extension(ext: &[u8]) -> bool {
+    let start = ext.iter().take_while(|&&b| b == b'.').count();
+    ext[start..].eq_ignore_ascii_case(b"jpg")
 }
 
 /// Parses EXIF "YYYY:MM:DD HH:MM:SS" as a naive timestamp (treated as UTC; used only for sorting).
@@ -247,6 +253,16 @@ mod tests {
     /// `EXIV2_LOCK`. The one way around them is calling the C function directly, so each
     /// locked entry point must be called exactly once in `gexiv2.rs`: inside its guarded
     /// method (`Preview::data` is guarded through the borrow `get_preview_images` returns).
+    #[test]
+    fn jpeg_extension_matching() {
+        for ext in [".jpg", ".JPG", "jpg", ".Jpg"] {
+            assert!(is_jpeg_extension(ext.as_bytes()), "{ext}");
+        }
+        for ext in [".jpeg", ".tif", ".jpgx", "", "."] {
+            assert!(!is_jpeg_extension(ext.as_bytes()), "{ext}");
+        }
+    }
+
     #[test]
     fn locked_ffi_calls_only_in_guarded_methods() {
         const LOCKED: [&str; 5] = [
