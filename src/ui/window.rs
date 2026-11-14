@@ -11,7 +11,7 @@ use super::{filterbar, grid, keys, prefs, style};
 
 pub fn build(app: &adw::Application, start_folder: Option<PathBuf>) {
     let (tx, rx) = async_channel::unbounded();
-    let state = AppState::new(tx);
+    let state = AppState::new(tx, rx.clone());
 
     let window = adw::ApplicationWindow::builder()
         .application(app)
