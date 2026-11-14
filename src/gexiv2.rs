@@ -49,6 +49,11 @@ mod sys {
         pub fn g_object_unref(object: *mut c_void);
         pub fn g_free(mem: *mut c_void);
         pub fn g_error_free(error: *mut GError);
+        #[cfg(test)]
+        pub fn g_quark_from_static_string(string: *const c_char) -> u32;
+        #[cfg(test)]
+        pub fn g_error_new_literal(domain: u32, code: c_int, message: *const c_char)
+        -> *mut GError;
 
         pub fn gexiv2_initialize() -> GBoolean;
         pub fn gexiv2_log_set_level(level: c_int);
@@ -191,6 +196,39 @@ fn with_error<T>(f: impl FnOnce(*mut *mut sys::GError) -> T) -> Result<T> {
     }
 }
 
+/// An owned `gchar*` returned by gexiv2, released with `g_free`. May be null.
+///
+/// Returned from `with_error` closures so the string is freed even when the call also sets an
+/// error and `with_error` discards the value.
+struct GString(*mut c_char);
+
+impl GString {
+    fn as_c_str(&self) -> Option<&CStr> {
+        (!self.0.is_null()).then(|| unsafe { CStr::from_ptr(self.0) })
+    }
+}
+
+impl Drop for GString {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { sys::g_free(self.0.cast()) }
+        }
+    }
+}
+
+/// An owned `GExiv2PreviewImage*`, released with `g_object_unref`. May be null.
+///
+/// Like `GString`, this frees the image when a call returns one and also sets an error.
+struct PreviewImage(*mut sys::GExiv2PreviewImage);
+
+impl Drop for PreviewImage {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { sys::g_object_unref(self.0.cast()) }
+        }
+    }
+}
+
 fn check(ok: sys::GBoolean, err: Result<()>) -> Result<()> {
     err?;
     if ok == 0 {
@@ -284,17 +322,11 @@ impl Metadata {
 
     pub fn get_tag_string(&self, tag: &str) -> Result<String> {
         let tag = cstring(tag)?;
-        let value = with_error(|e| unsafe {
-            sys::gexiv2_metadata_try_get_tag_string(self.raw, tag.as_ptr(), e)
+        let value = with_error(|e| {
+            GString(unsafe { sys::gexiv2_metadata_try_get_tag_string(self.raw, tag.as_ptr(), e) })
         })?;
-        if value.is_null() {
-            return Err(Error::NoValue);
-        }
-        let s = unsafe { CStr::from_ptr(value) }
-            .to_string_lossy()
-            .into_owned();
-        unsafe { sys::g_free(value.cast()) };
-        Ok(s)
+        let s = value.as_c_str().ok_or(Error::NoValue)?;
+        Ok(s.to_string_lossy().into_owned())
     }
 
     pub fn set_tag_string(&self, tag: &str, value: &str) -> Result<()> {
@@ -396,22 +428,70 @@ impl Preview<'_> {
     }
 
     pub fn data(&self) -> Result<Vec<u8>> {
-        let image = with_error(|e| unsafe {
-            sys::gexiv2_metadata_try_get_preview_image(self.meta.raw, self.props, e)
+        let image = with_error(|e| {
+            PreviewImage(unsafe {
+                sys::gexiv2_metadata_try_get_preview_image(self.meta.raw, self.props, e)
+            })
         })?;
-        if image.is_null() {
+        if image.0.is_null() {
             return Err(Error::NoValue);
         }
         let mut size: c_uint = 0;
-        let result = unsafe {
-            let data = sys::gexiv2_preview_image_get_data(image, &mut size);
-            if data.is_null() {
-                Err(Error::NoValue)
-            } else {
-                Ok(std::slice::from_raw_parts(data, size as usize).to_vec())
-            }
-        };
-        unsafe { sys::g_object_unref(image.cast()) };
-        result
+        let data = unsafe { sys::gexiv2_preview_image_get_data(image.0, &mut size) };
+        if data.is_null() {
+            return Err(Error::NoValue);
+        }
+        // `image` owns the buffer and outlives this copy.
+        Ok(unsafe { std::slice::from_raw_parts(data, size as usize) }.to_vec())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    struct DropFlag<'a>(&'a Cell<bool>);
+
+    impl Drop for DropFlag<'_> {
+        fn drop(&mut self) {
+            self.0.set(true);
+        }
+    }
+
+    fn set_error(slot: *mut *mut sys::GError, message: &CStr) {
+        unsafe {
+            let domain = sys::g_quark_from_static_string(c"photobrowser-test".as_ptr());
+            *slot = sys::g_error_new_literal(domain, 1, message.as_ptr());
+        }
+    }
+
+    #[test]
+    fn with_error_drops_value_when_error_is_set() {
+        let dropped = Cell::new(false);
+        let result = with_error(|e| {
+            set_error(e, c"boom");
+            DropFlag(&dropped)
+        });
+        assert!(matches!(result, Err(Error::Gexiv2(ref m)) if m == "boom"));
+        assert!(
+            dropped.get(),
+            "value returned alongside an error must be dropped"
+        );
+    }
+
+    #[test]
+    fn with_error_returns_value_when_no_error() {
+        let dropped = Cell::new(false);
+        let result = with_error(|_| DropFlag(&dropped));
+        assert!(result.is_ok());
+        assert!(!dropped.get());
+    }
+
+    #[test]
+    fn null_owned_pointers_drop_safely() {
+        drop(GString(ptr::null_mut()));
+        drop(PreviewImage(ptr::null_mut()));
+        assert!(GString(ptr::null_mut()).as_c_str().is_none());
     }
 }
