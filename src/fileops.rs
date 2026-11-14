@@ -3,7 +3,7 @@ use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::xmp::sidecar_path;
+use crate::xmp::{is_sidecar, sidecar_path};
 
 const MAX_RENAME_ATTEMPTS: u32 = 10_000;
 
@@ -60,8 +60,13 @@ fn build_plan(sources: &[PathBuf], dest_dir: &Path, n: u32) -> Vec<(PathBuf, Pat
     plan
 }
 
+/// True if nothing in the plan would land on an existing path. A photo's sidecar name at the
+/// destination must be free too, even when the photo has no sidecar to bring along: otherwise
+/// it would silently adopt a leftover sidecar of another photo (its rating, reject flag and
+/// darktable history).
 fn is_free(plan: &[(PathBuf, PathBuf)]) -> bool {
-    plan.iter().all(|(_, dst)| !exists(dst))
+    plan.iter()
+        .all(|(_, dst)| !exists(dst) && (is_sidecar(dst) || !exists(&sidecar_path(dst))))
 }
 
 pub fn has_conflict(sources: &[PathBuf], dest_dir: &Path) -> bool {
@@ -323,6 +328,50 @@ mod tests {
             fs::read_to_string(f.dst.join("IMG_1.JPG")).unwrap(),
             "existing"
         );
+    }
+
+    #[test]
+    fn leftover_sidecar_at_destination_is_a_conflict() {
+        let f = fixture();
+        let raw = f.src.join("IMG_1.CR3");
+        write(&raw, "raw");
+        let leftover = f.dst.join("IMG_1.CR3.xmp");
+        write(&leftover, "another photo's edits");
+        let sources = vec![raw];
+        assert!(has_conflict(&sources, &f.dst));
+        let out = transfer_item(&sources, &f.dst, OpKind::Move, ConflictPolicy::Skip);
+        assert_eq!(out, TransferOutcome::Skipped);
+        assert_eq!(names(&f.src), ["IMG_1.CR3"]);
+        assert_eq!(
+            fs::read_to_string(&leftover).unwrap(),
+            "another photo's edits"
+        );
+    }
+
+    #[test]
+    fn keep_both_avoids_a_leftover_sidecar() {
+        let f = fixture();
+        let raw = f.src.join("IMG_1.CR3");
+        write(&raw, "raw");
+        write(&f.dst.join("IMG_1.CR3.xmp"), "leftover");
+        let out = transfer_item(&[raw], &f.dst, OpKind::Move, ConflictPolicy::Rename);
+        assert!(matches!(out, TransferOutcome::Done(_)), "{out:?}");
+        assert_eq!(names(&f.dst), ["IMG_1.CR3.xmp", "IMG_1_1.CR3"]);
+        assert_eq!(
+            fs::read_to_string(f.dst.join("IMG_1.CR3.xmp")).unwrap(),
+            "leftover"
+        );
+    }
+
+    #[test]
+    fn keep_both_skips_numbers_with_a_leftover_sidecar() {
+        let f = fixture();
+        let raw = f.src.join("IMG_1.CR3");
+        write(&raw, "raw");
+        write(&f.dst.join("IMG_1.CR3"), "x");
+        write(&f.dst.join("IMG_1_1.CR3.xmp"), "leftover");
+        let plan = plan_targets(&[raw], &f.dst, ConflictPolicy::Rename).unwrap();
+        assert_eq!(plan, [(f.src.join("IMG_1.CR3"), f.dst.join("IMG_1_2.CR3"))]);
     }
 
     #[test]
