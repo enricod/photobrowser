@@ -11,7 +11,8 @@ use std::path::Path;
 use crate::media::{FileKind, MediaFile};
 pub use pixels::{Quality, Rgba};
 
-/// Long edge of cached thumbnails, in pixels.
+/// Long edge of cached thumbnails, in pixels. Changing it changes cached output: bump
+/// `thumbcache::CACHE_VERSION` too.
 pub const THUMB_EDGE: u32 = 256;
 
 #[derive(Debug, thiserror::Error)]
