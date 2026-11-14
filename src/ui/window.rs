@@ -5,6 +5,7 @@ use adw::prelude::*;
 use gtk::gio;
 use gtk::glib;
 
+use super::pathbar::PathBar;
 use super::state::{AppState, Widgets};
 use super::viewer::Viewer;
 use super::{filterbar, grid, keys, prefs, style};
@@ -68,8 +69,10 @@ pub fn build(app: &adw::Application, start_folder: Option<PathBuf>) {
     stack.add_named(&viewer.root, Some("viewer"));
     let toasts = adw::ToastOverlay::new();
     toasts.set_child(Some(&stack));
+    let path_bar = PathBar::new();
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
+    toolbar.add_top_bar(&path_bar.root);
     toolbar.set_content(Some(&toasts));
     window.set_content(Some(&toolbar));
 
@@ -81,6 +84,7 @@ pub fn build(app: &adw::Application, start_folder: Option<PathBuf>) {
         counter,
         filters,
         viewer,
+        path_bar,
     });
 
     let s = state.clone();

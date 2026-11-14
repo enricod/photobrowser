@@ -3,6 +3,7 @@ pub mod filterbar;
 pub mod grid;
 pub mod item_object;
 pub mod keys;
+pub mod pathbar;
 pub mod prefs;
 pub mod state;
 pub mod style;
