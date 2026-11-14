@@ -14,6 +14,8 @@ pub struct Listing {
     pub unreadable: Vec<PathBuf>,
     /// Some directory entry could not be read, so any known file may be missing from `files`.
     pub incomplete: bool,
+    /// Non-hidden subfolders (symlinks followed), sorted by name ignoring case.
+    pub folders: Vec<PathBuf>,
 }
 
 /// Lists supported, non-hidden regular files directly inside `folder` (symlinks followed).
@@ -32,18 +34,24 @@ pub fn list_media_files(folder: &Path) -> io::Result<Listing> {
             continue;
         }
         let path = entry.path();
-        let Some(kind) = FileKind::from_path(&path) else {
-            continue;
-        };
+        let kind = FileKind::from_path(&path);
         let meta = match fs::metadata(&path) {
             Ok(meta) => meta,
             // Gone since the listing, or a dangling symlink: really not there.
             Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-            Err(e) => {
+            Err(e) if kind.is_some() => {
                 eprintln!("scan: can't read {}: {e}", path.display());
                 out.unreadable.push(path);
                 continue;
             }
+            Err(_) => continue,
+        };
+        if meta.is_dir() {
+            out.folders.push(path);
+            continue;
+        }
+        let Some(kind) = kind else {
+            continue;
         };
         if !meta.is_file() {
             continue;
@@ -55,6 +63,12 @@ pub fn list_media_files(folder: &Path) -> io::Result<Listing> {
             mtime_ns: mtime_ns(&meta),
         });
     }
+    out.folders.sort_by_cached_key(|p| {
+        p.file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_lowercase()
+    });
     Ok(out)
 }
 
@@ -90,6 +104,27 @@ mod tests {
         assert!(listing.files.is_empty());
         assert_eq!(listing.unreadable, [looped]);
         assert!(!listing.incomplete);
+    }
+
+    #[test]
+    fn lists_visible_subfolders_sorted() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["lisbon", "Dolomiti", ".hidden", "2026-11-14", "photo.jpg.d"] {
+            fs::create_dir(dir.path().join(name)).unwrap();
+        }
+        fs::write(dir.path().join("a.jpg"), b"x").unwrap();
+        fs::write(dir.path().join(".IMG.CR3.pbpart"), b"x").unwrap();
+        std::os::unix::fs::symlink(dir.path().join("lisbon"), dir.path().join("link")).unwrap();
+        let names: Vec<_> = list_media_files(dir.path())
+            .unwrap()
+            .folders
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            ["2026-11-14", "Dolomiti", "link", "lisbon", "photo.jpg.d"]
+        );
     }
 
     #[test]

@@ -28,6 +28,10 @@ fn display_dir_with_home(path: &Path, home: &Path) -> String {
 pub struct PathBar {
     pub root: gtk::Box,
     label: gtk::Label,
+    /// Opens the parent folder; insensitive at the root.
+    pub up: gtk::Button,
+    /// "Show folders": the subfolder strip above the grid.
+    pub show_folders: gtk::CheckButton,
 }
 
 impl PathBar {
@@ -52,9 +56,27 @@ impl PathBar {
             .margin_bottom(4)
             .visible(false)
             .build();
+        let up = gtk::Button::builder()
+            .icon_name("go-up-symbolic")
+            .tooltip_text("Open Parent Folder (Alt+↑)")
+            .valign(gtk::Align::Center)
+            .build();
+        up.add_css_class("flat");
+        root.append(&up);
         root.append(&icon);
         root.append(&label);
-        PathBar { root, label }
+        let show_folders = gtk::CheckButton::builder()
+            .label("Show folders")
+            .valign(gtk::Align::Center)
+            .build();
+        show_folders.add_css_class("caption");
+        root.append(&show_folders);
+        PathBar {
+            root,
+            label,
+            up,
+            show_folders,
+        }
     }
 
     /// Shows `folder`, or hides the bar when there is none.
@@ -62,12 +84,13 @@ impl PathBar {
         match folder {
             Some(folder) => {
                 self.label.set_label(&display_dir(folder));
-                self.root.set_tooltip_text(Some(&folder.to_string_lossy()));
+                self.label.set_tooltip_text(Some(&folder.to_string_lossy()));
+                self.up.set_sensitive(folder.parent().is_some());
                 self.root.set_visible(true);
             }
             None => {
                 self.label.set_label("");
-                self.root.set_tooltip_text(None);
+                self.label.set_tooltip_text(None);
                 self.root.set_visible(false);
             }
         }

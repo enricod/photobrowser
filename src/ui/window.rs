@@ -5,6 +5,7 @@ use adw::prelude::*;
 use gtk::gio;
 use gtk::glib;
 
+use super::folderstrip::FolderStrip;
 use super::pathbar::PathBar;
 use super::state::{AppState, Widgets};
 use super::viewer::Viewer;
@@ -73,7 +74,16 @@ pub fn build(app: &adw::Application, start_folder: Option<PathBuf>) {
 
     let stack = gtk::Stack::new();
     stack.add_named(&empty, Some("empty"));
-    stack.add_named(&grid_scroller, Some("grid"));
+    // Opening a folder rebuilds the strip: do it after the activation signal has returned.
+    let s = state.clone();
+    let folder_strip = FolderStrip::new(move |folder| {
+        let s = s.clone();
+        glib::idle_add_local_once(move || s.open_folder(folder));
+    });
+    let grid_page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    grid_page.append(&folder_strip.root);
+    grid_page.append(&grid_scroller);
+    stack.add_named(&grid_page, Some("grid"));
     let viewer = Viewer::new(&state);
     stack.add_named(&viewer.root, Some("viewer"));
     let toasts = adw::ToastOverlay::new();
@@ -93,8 +103,19 @@ pub fn build(app: &adw::Application, start_folder: Option<PathBuf>) {
         counter,
         filters,
         viewer,
-        path_bar,
+        path_bar: path_bar.clone(),
+        folder_strip,
     });
+
+    path_bar
+        .show_folders
+        .set_active(state.config.borrow().show_folders);
+    let s = state.clone();
+    path_bar
+        .show_folders
+        .connect_toggled(move |b| s.set_show_folders(b.is_active()));
+    let s = state.clone();
+    path_bar.up.connect_clicked(move |_| s.open_parent());
 
     let s = state.clone();
     window.connect_close_request(move |_| s.close_requested());

@@ -1,5 +1,6 @@
 pub mod dialogs;
 pub mod filterbar;
+pub mod folderstrip;
 pub mod grid;
 pub mod item_object;
 pub mod keys;

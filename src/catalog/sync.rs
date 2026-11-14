@@ -17,10 +17,13 @@ pub struct ScanResult {
     pub upserts: Vec<FileRecord>,
     /// Paths known to the index that no longer exist.
     pub removed: Vec<PathBuf>,
+    /// The folder's non-hidden subfolders, sorted by name.
+    pub folders: Vec<PathBuf>,
 }
 
 pub fn scan_folder(folder: &Path, known: &HashMap<PathBuf, FileRecord>) -> io::Result<ScanResult> {
     let listing = list_media_files(folder)?;
+    let folders = listing.folders;
     let mut files = listing.files;
     // Known files the listing could not check are kept exactly as recorded (shown, rating
     // intact, not removed) until a later scan can read them.
@@ -79,6 +82,7 @@ pub fn scan_folder(folder: &Path, known: &HashMap<PathBuf, FileRecord>) -> io::R
         items,
         upserts,
         removed,
+        folders,
     })
 }
 
@@ -260,6 +264,16 @@ mod tests {
         assert!(second.upserts.is_empty());
         assert_eq!(second.items.len(), 1);
         assert_eq!(second.items[0].rating, 4);
+    }
+
+    #[test]
+    fn scan_reports_subfolders() {
+        let dir = tempfile::tempdir().unwrap();
+        touch(dir.path(), "a.jpg", b"x");
+        fs::create_dir(dir.path().join("trip")).unwrap();
+        let r = scan_folder(dir.path(), &HashMap::new()).unwrap();
+        assert_eq!(r.folders, [dir.path().join("trip")]);
+        assert_eq!(r.items.len(), 1);
     }
 
     #[test]
