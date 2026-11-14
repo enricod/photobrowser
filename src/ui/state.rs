@@ -1645,7 +1645,9 @@ impl AppState {
                             Some(rec)
                         })
                         .collect();
-                    if let Err(e) = index.upsert_many(&copies) {
+                    // A row already at a destination is for a file that is gone (a copy
+                    // never overwrites): replace it, keeping none of its stale rating.
+                    if let Err(e) = index.replace_many(&copies) {
                         eprintln!("index: {e}");
                     }
                     copies

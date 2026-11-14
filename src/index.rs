@@ -286,6 +286,33 @@ impl Index {
         Ok(())
     }
 
+    /// Writes `recs` as given, replacing any row already at their paths. For copies: a copy
+    /// never overwrites a file, so a row at its destination describes a file that is gone, and
+    /// its (possibly dirty) rating must not survive the way `upsert_many` would keep it.
+    pub fn replace_many(&mut self, recs: &[FileRecord]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        {
+            let mut delete = tx.prepare_cached("DELETE FROM files WHERE path = ?1")?;
+            let mut insert = tx.prepare_cached(UPSERT)?;
+            for r in recs {
+                delete.execute([bytes(&r.path)])?;
+                insert.execute(params![
+                    bytes(&r.path),
+                    folder_bytes(&r.path),
+                    r.size as i64,
+                    r.mtime_ns,
+                    r.capture_time,
+                    r.rating,
+                    r.rejected,
+                    r.xmp_synced_at,
+                    r.xmp_dirty,
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn remove_paths(&mut self, paths: &[PathBuf]) -> Result<()> {
         let tx = self.conn.transaction()?;
         {
@@ -446,6 +473,30 @@ mod tests {
         idx.upsert_many(&[scanned]).unwrap();
         let r = idx.get(Path::new("/p/a.jpg")).unwrap().unwrap();
         assert_eq!((r.size, r.rating, r.xmp_dirty), (99, 5, true));
+    }
+
+    #[test]
+    fn replace_many_overwrites_a_stale_dirty_row() {
+        let mut idx = Index::open_in_memory().unwrap();
+        idx.upsert_many(&[rec("/d/a.jpg")]).unwrap();
+        idx.set_rating(&media("/d/a.jpg"), 1, true).unwrap(); // stale, dirty
+        let mut copied = rec("/d/a.jpg");
+        copied.size = 77;
+        copied.rating = 2;
+        copied.xmp_synced_at = Some(555);
+        idx.replace_many(std::slice::from_ref(&copied)).unwrap();
+        assert_eq!(idx.get(Path::new("/d/a.jpg")).unwrap().unwrap(), copied);
+    }
+
+    #[test]
+    fn replace_many_inserts_new_rows() {
+        let mut idx = Index::open_in_memory().unwrap();
+        let mut copied = rec("/d/b.jpg");
+        copied.rating = 3;
+        copied.xmp_dirty = true;
+        idx.replace_many(std::slice::from_ref(&copied)).unwrap();
+        assert_eq!(idx.get(Path::new("/d/b.jpg")).unwrap().unwrap(), copied);
+        assert_eq!(idx.load_folder(Path::new("/d")).unwrap().len(), 1);
     }
 
     #[test]
