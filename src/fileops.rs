@@ -1,6 +1,8 @@
-use std::ffi::OsString;
+use std::collections::HashSet;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use crate::xmp::{is_sidecar, sidecar_path};
@@ -41,9 +43,93 @@ fn numbered_name(src: &Path, n: u32) -> OsString {
     s
 }
 
-fn build_plan(sources: &[PathBuf], dest_dir: &Path, n: u32) -> Vec<(PathBuf, PathBuf)> {
+/// A sidecar another tool keeps next to a photo, besides our `<file>.<ext>.xmp`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum Extra {
+    /// darktable duplicate `<stem>_<digits>.<ext>.xmp`; holds the digits.
+    Duplicate(OsString),
+    /// `<stem>.xmp` (Lightroom, Capture One, digiKam).
+    Stem,
+}
+
+/// Extra sidecars of each source, read once per item (the Keep Both loop reuses them). A
+/// `<stem>_<digits>.<ext>.xmp` is a duplicate only if no photo `<stem>_<digits>.<ext>` exists:
+/// otherwise it is that photo's own sidecar. `<stem>.xmp` is shared by a RAW+JPEG pair, so it
+/// goes with the first source only.
+fn find_extras(sources: &[PathBuf]) -> Vec<Vec<(PathBuf, Extra)>> {
+    let mut taken: HashSet<PathBuf> = HashSet::new();
+    sources
+        .iter()
+        .map(|src| {
+            let (Some(dir), Some(stem), Some(ext)) =
+                (src.parent(), src.file_stem(), src.extension())
+            else {
+                return Vec::new();
+            };
+            let Ok(entries) = fs::read_dir(dir) else {
+                return Vec::new();
+            };
+            let names: HashSet<OsString> = entries
+                .filter_map(|e| e.ok().map(|e| e.file_name()))
+                .collect();
+            let (stem_b, ext_b) = (stem.as_bytes(), ext.as_bytes());
+            let mut extras = Vec::new();
+            for name in &names {
+                let n = name.as_bytes();
+                let extra = if n == [stem_b, b".xmp"].concat().as_slice() {
+                    Some(Extra::Stem)
+                } else {
+                    let prefix = [stem_b, b"_"].concat();
+                    let suffix = [b".", ext_b, b".xmp"].concat();
+                    n.strip_prefix(prefix.as_slice())
+                        .and_then(|rest| rest.strip_suffix(suffix.as_slice()))
+                        .filter(|d| !d.is_empty() && d.iter().all(u8::is_ascii_digit))
+                        .filter(|d| {
+                            let photo = [stem_b, b"_", d, b".", ext_b].concat();
+                            !names.contains(OsStr::from_bytes(&photo))
+                        })
+                        .map(|d| Extra::Duplicate(OsStr::from_bytes(d).to_os_string()))
+                };
+                if let Some(extra) = extra {
+                    let path = dir.join(name);
+                    if taken.insert(path.clone()) {
+                        extras.push((path, extra));
+                    }
+                }
+            }
+            extras.sort();
+            extras
+        })
+        .collect()
+}
+
+/// Where an extra sidecar goes when its photo lands at `dst`.
+fn extra_destination(dst: &Path, extra: &Extra) -> PathBuf {
+    let stem = dst.file_stem().unwrap_or_default();
+    let mut name = stem.to_os_string();
+    match extra {
+        Extra::Duplicate(digits) => {
+            name.push("_");
+            name.push(digits);
+            if let Some(ext) = dst.extension() {
+                name.push(".");
+                name.push(ext);
+            }
+            name.push(".xmp");
+        }
+        Extra::Stem => name.push(".xmp"),
+    }
+    dst.with_file_name(name)
+}
+
+fn build_plan(
+    sources: &[PathBuf],
+    extras: &[Vec<(PathBuf, Extra)>],
+    dest_dir: &Path,
+    n: u32,
+) -> Vec<(PathBuf, PathBuf)> {
     let mut plan = Vec::new();
-    for src in sources {
+    for (i, src) in sources.iter().enumerate() {
         let name = if n == 0 {
             src.file_name().unwrap_or_default().to_os_string()
         } else {
@@ -55,6 +141,9 @@ fn build_plan(sources: &[PathBuf], dest_dir: &Path, n: u32) -> Vec<(PathBuf, Pat
         plan.push((src.clone(), dst.clone()));
         if has_sidecar {
             plan.push((sidecar, sidecar_path(&dst)));
+        }
+        for (path, extra) in extras.get(i).into_iter().flatten() {
+            plan.push((path.clone(), extra_destination(&dst, extra)));
         }
     }
     plan
@@ -70,7 +159,7 @@ fn is_free(plan: &[(PathBuf, PathBuf)]) -> bool {
 }
 
 pub fn has_conflict(sources: &[PathBuf], dest_dir: &Path) -> bool {
-    !is_free(&build_plan(sources, dest_dir, 0))
+    !is_free(&build_plan(sources, &find_extras(sources), dest_dir, 0))
 }
 
 pub fn plan_targets(
@@ -78,14 +167,15 @@ pub fn plan_targets(
     dest_dir: &Path,
     policy: ConflictPolicy,
 ) -> Option<Vec<(PathBuf, PathBuf)>> {
-    let plain = build_plan(sources, dest_dir, 0);
+    let extras = find_extras(sources);
+    let plain = build_plan(sources, &extras, dest_dir, 0);
     if is_free(&plain) {
         return Some(plain);
     }
     match policy {
         ConflictPolicy::Skip => None,
         ConflictPolicy::Rename => (1..=MAX_RENAME_ATTEMPTS)
-            .map(|n| build_plan(sources, dest_dir, n))
+            .map(|n| build_plan(sources, &extras, dest_dir, n))
             .find(|p| is_free(p)),
     }
 }
@@ -426,6 +516,115 @@ mod tests {
     fn sync_dir_succeeds_on_a_regular_folder() {
         let f = fixture();
         sync_dir(&f.dst).unwrap();
+    }
+
+    /// IMG_1.CR3 with its own sidecar and two darktable duplicates, in `src`.
+    fn raw_with_duplicates(f: &Fixture) -> PathBuf {
+        let raw = f.src.join("IMG_1.CR3");
+        write(&raw, "raw");
+        write(&sidecar_path(&raw), "v0");
+        write(&f.src.join("IMG_1_01.CR3.xmp"), "v1");
+        write(&f.src.join("IMG_1_02.CR3.xmp"), "v2");
+        raw
+    }
+
+    #[test]
+    fn darktable_duplicates_move_with_their_photo() {
+        let f = fixture();
+        let raw = raw_with_duplicates(&f);
+        let out = transfer_item(&[raw], &f.dst, OpKind::Move, ConflictPolicy::Skip);
+        assert!(matches!(out, TransferOutcome::Done(_)), "{out:?}");
+        assert_eq!(
+            names(&f.dst),
+            [
+                "IMG_1.CR3",
+                "IMG_1.CR3.xmp",
+                "IMG_1_01.CR3.xmp",
+                "IMG_1_02.CR3.xmp"
+            ]
+        );
+        assert!(names(&f.src).is_empty());
+    }
+
+    #[test]
+    fn stem_sidecar_moves_once_with_a_pair() {
+        let f = fixture();
+        let sources = pair(&f);
+        write(&f.src.join("IMG_1.xmp"), "lightroom");
+        let out = transfer_item(&sources, &f.dst, OpKind::Move, ConflictPolicy::Skip);
+        let TransferOutcome::Done(done) = out else {
+            panic!("{out:?}")
+        };
+        assert_eq!(done.len(), 4);
+        assert_eq!(
+            names(&f.dst),
+            ["IMG_1.CR3", "IMG_1.CR3.xmp", "IMG_1.JPG", "IMG_1.xmp"]
+        );
+        assert!(names(&f.src).is_empty());
+    }
+
+    #[test]
+    fn another_photos_sidecar_is_not_a_duplicate() {
+        let f = fixture();
+        let raw = f.src.join("IMG_1.CR3");
+        write(&raw, "raw");
+        // A real photo IMG_1_01.CR3 owns IMG_1_01.CR3.xmp.
+        write(&f.src.join("IMG_1_01.CR3"), "other photo");
+        write(&f.src.join("IMG_1_01.CR3.xmp"), "other photo's sidecar");
+        let out = transfer_item(&[raw], &f.dst, OpKind::Move, ConflictPolicy::Skip);
+        assert!(matches!(out, TransferOutcome::Done(_)), "{out:?}");
+        assert_eq!(names(&f.dst), ["IMG_1.CR3"]);
+        assert_eq!(names(&f.src), ["IMG_1_01.CR3", "IMG_1_01.CR3.xmp"]);
+    }
+
+    #[test]
+    fn keep_both_renames_extra_sidecars_to_match() {
+        let f = fixture();
+        let raw = raw_with_duplicates(&f);
+        write(&f.src.join("IMG_1.xmp"), "lightroom");
+        write(&f.dst.join("IMG_1.CR3"), "existing");
+        let out = transfer_item(&[raw], &f.dst, OpKind::Move, ConflictPolicy::Rename);
+        assert!(matches!(out, TransferOutcome::Done(_)), "{out:?}");
+        assert_eq!(
+            names(&f.dst),
+            [
+                "IMG_1.CR3",
+                "IMG_1_1.CR3",
+                "IMG_1_1.CR3.xmp",
+                "IMG_1_1.xmp",
+                "IMG_1_1_01.CR3.xmp",
+                "IMG_1_1_02.CR3.xmp"
+            ]
+        );
+        assert_eq!(
+            fs::read_to_string(f.dst.join("IMG_1_1_02.CR3.xmp")).unwrap(),
+            "v2"
+        );
+    }
+
+    #[test]
+    fn copy_brings_extra_sidecars_and_keeps_originals() {
+        let f = fixture();
+        let raw = raw_with_duplicates(&f);
+        let out = transfer_item(&[raw], &f.dst, OpKind::Copy, ConflictPolicy::Skip);
+        assert!(matches!(out, TransferOutcome::Done(_)), "{out:?}");
+        assert_eq!(names(&f.dst), names(&f.src));
+        assert_eq!(names(&f.src).len(), 4);
+    }
+
+    #[test]
+    fn taken_extra_sidecar_name_is_a_conflict() {
+        let f = fixture();
+        let raw = raw_with_duplicates(&f);
+        write(&f.dst.join("IMG_1_02.CR3.xmp"), "someone else's");
+        let sources = vec![raw];
+        assert!(has_conflict(&sources, &f.dst));
+        let out = transfer_item(&sources, &f.dst, OpKind::Move, ConflictPolicy::Skip);
+        assert_eq!(out, TransferOutcome::Skipped);
+        assert_eq!(
+            fs::read_to_string(f.dst.join("IMG_1_02.CR3.xmp")).unwrap(),
+            "someone else's"
+        );
     }
 
     #[test]
