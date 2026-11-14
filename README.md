@@ -58,6 +58,7 @@ overrode it) to remove both files again.
 | Key | Action |
 |---|---|
 | `Ctrl+O` | Open folder |
+| `Alt+↑` | Open the parent folder (also ↑ in the path bar) |
 | `1`–`5` / `0` | Set / clear rating |
 | `X` | Toggle reject |
 | `M` / `C` | Move / copy to folder… |
@@ -75,8 +76,14 @@ overrode it) to remove both files again.
 
 Ratings apply to the selection in the grid and to the current image in the full view.
 
-The main menu (top-right of the header bar) has a **Preferences** dialog for
-auto-advance after rating and the in-memory/disk cache sizes.
+The main menu (top-right of the header bar) has **Move to…**, **Copy to…** and
+**Organize…** (sort the selection into `YYYY/YYYY-MM-DD` folders by shot date),
+**Keyboard Shortcuts**, and a **Preferences** dialog for auto-advance after rating
+and the in-memory/disk cache sizes.
+
+The bar under the header shows the open folder, with a ↑ button to open its
+parent. Tick **Show folders** there to list its subfolders above the grid:
+click one to open it.
 
 ## Where things are stored
 

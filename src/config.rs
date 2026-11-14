@@ -12,6 +12,8 @@ pub struct Config {
     pub full_cache_items: usize,
     pub disk_cache_mb: u64,
     pub thumb_display_size: i32,
+    /// Show the open folder's subfolders above the grid.
+    pub show_folders: bool,
     /// Left out when saving if it is not valid UTF-8 (TOML strings must be), so it cannot
     /// make every save fail.
     #[serde(serialize_with = "utf8_path_or_none")]
@@ -33,6 +35,7 @@ impl Default for Config {
             full_cache_items: 6,
             disk_cache_mb: 2048,
             thumb_display_size: 192,
+            show_folders: false,
             last_folder: None,
         }
     }
@@ -269,6 +272,20 @@ mod tests {
         fs::create_dir(dir.path().join("config.toml.tmp")).unwrap();
         assert!(Config::default().save_to(&path).is_err());
         assert_eq!(fs::read_to_string(&path).unwrap(), "auto_advance = true\n");
+    }
+
+    #[test]
+    fn show_folders_roundtrips_and_defaults_to_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "auto_advance = true\n").unwrap();
+        assert!(!Config::load_from(&path).show_folders, "older configs: off");
+        let cfg = Config {
+            show_folders: true,
+            ..Default::default()
+        };
+        cfg.save_to(&path).unwrap();
+        assert!(Config::load_from(&path).show_folders);
     }
 
     #[test]

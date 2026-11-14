@@ -12,6 +12,7 @@ use adw::prelude::*;
 use gtk::{gdk, gio, glib};
 use lru::LruCache;
 
+use super::folderstrip::FolderStrip;
 use super::item_object::ItemObject;
 use super::pathbar::{PathBar, display_dir};
 use super::viewer::{Viewer, info_text};
@@ -89,11 +90,14 @@ pub struct Widgets {
     pub filters: gtk::Box,
     pub viewer: Rc<Viewer>,
     pub path_bar: PathBar,
+    pub folder_strip: FolderStrip,
 }
 
 pub struct AppState {
     pub config: RefCell<Config>,
     pub index: RefCell<Index>,
+    /// The open folder's subfolders, from its last scan (see `refresh_folder_strip`).
+    subfolders: RefCell<Vec<PathBuf>>,
     /// Why the on-disk index could not be opened, if the app fell back to an in-memory one.
     index_unavailable: Option<String>,
     pub pool: JobPool,
@@ -370,6 +374,7 @@ impl AppState {
         Rc::new(AppState {
             config: RefCell::new(config),
             index: RefCell::new(index),
+            subfolders: RefCell::default(),
             index_unavailable,
             pool: JobPool::new(JobPool::default_threads()),
             disk: Arc::new(disk),
@@ -539,6 +544,8 @@ impl AppState {
             .window
             .set_title(Some(&format!("{name} — Photobrowser")));
         self.widgets().path_bar.set_folder(Some(&folder));
+        // Subfolders follow with the scan.
+        self.refresh_folder_strip();
 
         let known = self.index.borrow().load_folder(&folder).unwrap_or_default();
         let mut items = sync::items_from_records(&known);
@@ -574,6 +581,7 @@ impl AppState {
             w.stack.set_visible_child_name("grid");
         }
         self.objects.borrow_mut().clear();
+        self.subfolders.borrow_mut().clear();
         self.filter_state.borrow_mut().pinned.clear();
         // In-flight transfers (spawned, or still waiting on pending XMP writes) keep running
         // on disk paths, independent of which folder is open: `transferring` is kept, so
@@ -594,6 +602,7 @@ impl AppState {
         self.widgets().stack.set_visible_child_name("empty");
         self.widgets().window.set_title(Some("Photobrowser"));
         self.widgets().path_bar.set_folder(None);
+        self.refresh_folder_strip();
         self.toast(message);
     }
 
@@ -660,13 +669,15 @@ impl AppState {
             return;
         }
         self.scan_running.set(false);
-        let scan = match result {
+        let mut scan = match result {
             Ok(scan) => scan,
             Err(e) => {
                 self.folder_lost(&format!("Couldn't read the folder: {e}"));
                 return;
             }
         };
+        *self.subfolders.borrow_mut() = std::mem::take(&mut scan.folders);
+        self.refresh_folder_strip();
         // A file being moved away right now is "missing" to the scan, but its row is still
         // needed: `on_transferred` re-keys it to the destination.
         let moving = self.transferring_paths();
@@ -975,6 +986,31 @@ impl AppState {
     /// Handled at window level: GTK's own Ctrl+A only works while the grid has focus.
     pub fn select_all(&self) {
         self.selection.select_all();
+    }
+
+    /// Shows or hides the subfolder strip for the open folder, per the "Show folders" box.
+    pub fn refresh_folder_strip(&self) {
+        self.widgets().folder_strip.show(
+            &self.subfolders.borrow(),
+            self.config.borrow().show_folders && self.folder().is_some(),
+        );
+    }
+
+    /// Opens the parent of the open folder (path bar ↑, Alt+↑).
+    pub fn open_parent(self: &Rc<Self>) {
+        if let Some(parent) = self.folder().and_then(|f| f.parent().map(PathBuf::from)) {
+            self.open_folder(parent);
+        }
+    }
+
+    /// The "Show folders" box changed: remember it and update the strip.
+    pub fn set_show_folders(self: &Rc<Self>, on: bool) {
+        if self.config.borrow().show_folders == on {
+            return;
+        }
+        self.config.borrow_mut().show_folders = on;
+        self.schedule_config_save();
+        self.refresh_folder_strip();
     }
 
     pub fn focus_filters(&self) {

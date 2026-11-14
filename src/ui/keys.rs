@@ -21,6 +21,7 @@ pub const SHORTCUTS: &[ShortcutSection] = &[
         title: "General",
         items: &[
             ("Open folder", "<Control>o"),
+            ("Open the parent folder", "<Alt>Up"),
             ("Focus the filter bar", "<Control>f"),
             ("Select all visible photos", "<Control>a"),
             ("Keyboard shortcuts", "<Control>question"),
@@ -65,6 +66,10 @@ pub const SHORTCUTS: &[ShortcutSection] = &[
 pub fn handle(state: &Rc<AppState>, key: gdk::Key, mods: gdk::ModifierType) -> glib::Propagation {
     if state.widgets().window.visible_dialog().is_some() {
         return glib::Propagation::Proceed;
+    }
+    if key == gdk::Key::Up && mods.contains(gdk::ModifierType::ALT_MASK) {
+        state.open_parent();
+        return glib::Propagation::Stop;
     }
     let ctrl = mods.contains(gdk::ModifierType::CONTROL_MASK);
     let shift = mods.contains(gdk::ModifierType::SHIFT_MASK);
