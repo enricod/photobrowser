@@ -1,0 +1,98 @@
+id: io.github.enricod.PhotoBrowser
+runtime: org.gnome.Platform
+runtime-version: '51'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+  # libclang for bindgen (LibRaw bindings are generated at build time)
+  - org.freedesktop.Sdk.Extension.llvm23
+command: photobrowser
+
+finish-args:
+  - --share=ipc
+  - --socket=fallback-x11
+  - --socket=wayland
+  - --device=dri
+  # Photobrowser moves and copies photos, writes XMP sidecars next to them, watches and
+  # rescans the open folder and reopens it at the next launch. Portal-granted access to a
+  # single chosen folder cannot support that, so it needs lasting access to where photos
+  # live: the home folder and removable media (cards, USB drives).
+  - --filesystem=home
+  - --filesystem=/media
+  - --filesystem=/run/media
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/llvm23/bin
+  env:
+    LIBCLANG_PATH: /usr/lib/sdk/llvm23/lib
+
+cleanup:
+  - /include
+  - /lib/pkgconfig
+  - /lib/cmake
+  - /share/doc
+  - /share/man
+  - '*.la'
+  - '*.a'
+
+modules:
+  - name: libraw
+    buildsystem: autotools
+    config-opts:
+      - --disable-examples
+      - --disable-static
+    sources:
+      - type: archive
+        url: https://www.libraw.org/data/LibRaw-0.22.3.tar.gz
+        sha256: 789f3c33466210a1a0907f747a97c715d21bbf4af712f257fcbbd90111b227e4
+
+  - name: exiv2
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DEXIV2_ENABLE_INIH=OFF
+      - -DEXIV2_BUILD_SAMPLES=OFF
+      - -DEXIV2_BUILD_UNIT_TESTS=OFF
+      - -DEXIV2_BUILD_EXIV2_COMMAND=OFF
+    cleanup:
+      - /bin
+    sources:
+      - type: archive
+        url: https://github.com/Exiv2/exiv2/archive/refs/tags/v0.28.9.tar.gz
+        sha256: 700b76b97695b2fab4ef8c79619c68ae57d09e0c130724791cafbd39e0eb4aef
+
+  - name: gexiv2
+    buildsystem: meson
+    config-opts:
+      - -Dintrospection=false
+      - -Dvapi=false
+      - -Dpython3=false
+      - -Dtools=false
+    sources:
+      - type: archive
+        url: https://download.gnome.org/sources/gexiv2/0.16/gexiv2-0.16.2.tar.xz
+        sha256: aad9e240fdffbe85e390f46ee0a567e251baea5c29c3d8690260388683dc8d0a
+
+  - name: photobrowser
+    buildsystem: simple
+    build-options:
+      env:
+        # Vendored crates from cargo-sources.json: no network during the build.
+        CARGO_HOME: /run/build/photobrowser/cargo
+    build-commands:
+      - cargo --offline build --release
+      - install -Dm755 target/release/photobrowser -t /app/bin
+      - install -Dm644 data/io.github.enricod.PhotoBrowser.desktop -t /app/share/applications
+      - install -Dm644 data/io.github.enricod.PhotoBrowser.metainfo.xml -t /app/share/metainfo
+      - install -Dm644 data/icons/hicolor/scalable/apps/io.github.enricod.PhotoBrowser.svg
+        -t /app/share/icons/hicolor/scalable/apps
+    sources:
+      # The local checkout. For Flathub this becomes a git source pinned to a release tag.
+      - type: dir
+        path: ../..
+        skip:
+          - target
+          - .git
+          - .flatpak-builder
+          - build-flatpak
+      - cargo-sources.json

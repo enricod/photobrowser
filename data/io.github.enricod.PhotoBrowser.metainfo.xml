@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.enricod.PhotoBrowser</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+
+  <name>Photobrowser</name>
+  <summary>Fast photo culling for RAW and JPEG folders</summary>
+  <developer id="io.github.enricod">
+    <name>Enrico Donelli</name>
+  </developer>
+
+  <description>
+    <p>
+      Photobrowser is a fast way to go through a folder of photos, decide which ones to
+      keep, and sort them. It shows RAW and JPEG files side by side, keeps RAW+JPEG pairs
+      together, and stores ratings in darktable-compatible XMP sidecars.
+    </p>
+    <ul>
+      <li>Browse a folder as a thumbnail grid and open photos full screen</li>
+      <li>Rate with 1–5 and reject with X, straight from the keyboard</li>
+      <li>Filter by rating, rejects and file type</li>
+      <li>Move or copy photos together with their sidecars, safely</li>
+      <li>Organize photos into dated folders by shot date</li>
+      <li>Ratings live in XMP sidecars, so darktable sees them too</li>
+    </ul>
+  </description>
+
+  <launchable type="desktop-id">io.github.enricod.PhotoBrowser.desktop</launchable>
+
+  <url type="homepage">https://github.com/enricod/photobrowser</url>
+  <url type="bugtracker">https://github.com/enricod/photobrowser/issues</url>
+  <url type="vcs-browser">https://github.com/enricod/photobrowser</url>
+
+  <categories>
+    <category>Graphics</category>
+    <category>Photography</category>
+  </categories>
+
+  <keywords>
+    <keyword>photo</keyword>
+    <keyword>RAW</keyword>
+    <keyword>culling</keyword>
+    <keyword>rating</keyword>
+    <keyword>darktable</keyword>
+  </keywords>
+
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+  <requires>
+    <display_length compare="ge">768</display_length>
+  </requires>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="0.1.0" date="2026-11-14">
+      <description>
+        <p>First release.</p>
+      </description>
+    </release>
+  </releases>
+</component>

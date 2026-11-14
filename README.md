@@ -42,16 +42,36 @@ A `Makefile` wraps the common commands:
 | `make test-raw RAW=folder` | `cargo test` with `PB_RAW_SAMPLES` set, to also exercise RAW decoding. `RAW` is required. |
 | `make check` | `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`. |
 | `make bench [RAW=folder]` | `cargo bench`, including `PB_RAW_SAMPLES` when `RAW` is set. |
-| `make install [PREFIX=dir]` | Build, then install the binary and a desktop entry so the app shows up in GNOME. Default `PREFIX` is `$HOME/.local`. |
+| `make install [PREFIX=dir]` | Build, then install the binary, desktop entry, icon and AppStream metainfo so the app shows up in GNOME. Default `PREFIX` is `$HOME/.local`. |
 | `make uninstall [PREFIX=dir]` | Remove what `make install` installed. |
 | `make clean` | `cargo clean`. |
+| `make flatpak` | Build the Flatpak and install it for the current user (see below). |
+| `make flatpak-bundle` | Build `photobrowser.flatpak`, a single file installable elsewhere. |
+| `make flatpak-sources` | Regenerate `build-aux/flatpak/cargo-sources.json` after `Cargo.lock` changes. |
 
 `make install` puts the binary at `$(PREFIX)/bin/photobrowser` and the desktop
 entry at `$(PREFIX)/share/applications/io.github.enricod.PhotoBrowser.desktop`
 (default prefix: `~/.local`). `~/.local/bin` is on `PATH` by default on
 Fedora; if it isn't on yours, add it so the desktop entry's `Exec=photobrowser`
 can find the binary. Use `make uninstall` (with the same `PREFIX`, if you
-overrode it) to remove both files again.
+overrode it) to remove them again.
+
+### Flatpak
+
+The manifest is `build-aux/flatpak/io.github.enricod.PhotoBrowser.yml`: GNOME 51
+runtime, with LibRaw, exiv2 and gexiv2 built from source. It needs
+`flatpak-builder` (`sudo apt install flatpak-builder` / `sudo dnf install
+flatpak-builder`) and the Flathub remote; `make flatpak` installs the runtime,
+SDK and extensions it needs, builds, and installs the app for your user. Run it
+with `flatpak run io.github.enricod.PhotoBrowser`.
+
+Crates are vendored from `build-aux/flatpak/cargo-sources.json` (the build has
+no network): run `make flatpak-sources` whenever `Cargo.lock` changes.
+
+The sandbox has access to the home folder and removable media (`/media`,
+`/run/media`), since the app moves files and writes sidecars next to photos. Its
+settings, index and thumbnail cache live in `~/.var/app/io.github.enricod.PhotoBrowser/`,
+separate from a `make install` build.
 
 ## Keyboard
 

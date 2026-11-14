@@ -257,7 +257,7 @@ pub fn shortcuts(state: &Rc<AppState>) {
 pub fn about(state: &Rc<AppState>) {
     let dialog = adw::AboutDialog::builder()
         .application_name("Photobrowser")
-        .application_icon("folder-pictures")
+        .application_icon(super::APP_ID)
         .version(env!("CARGO_PKG_VERSION"))
         .developer_name("Enrico Donelli")
         .copyright("© 2026 Enrico Donelli")

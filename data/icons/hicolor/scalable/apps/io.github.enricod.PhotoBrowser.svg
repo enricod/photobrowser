@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#62a0ea"/>
+      <stop offset="1" stop-color="#99c1f1"/>
+    </linearGradient>
+    <linearGradient id="back-mountain" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#57e389"/>
+      <stop offset="1" stop-color="#2ec27e"/>
+    </linearGradient>
+    <linearGradient id="front-mountain" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#33d17a"/>
+      <stop offset="1" stop-color="#26a269"/>
+    </linearGradient>
+    <linearGradient id="star" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f8e45c"/>
+      <stop offset="1" stop-color="#f5c211"/>
+    </linearGradient>
+    <clipPath id="photo">
+      <rect x="16" y="22" width="96" height="74" rx="6"/>
+    </clipPath>
+  </defs>
+
+  <!-- A second print behind, for depth -->
+  <rect x="20" y="16" width="96" height="80" rx="8" fill="#c0bfbc" transform="rotate(-6 68 56)"/>
+
+  <!-- Photo print: white border, then the picture -->
+  <rect x="10" y="19" width="108" height="94" rx="10" fill="#000000" opacity="0.15"/>
+  <rect x="10" y="16" width="108" height="94" rx="10" fill="#ffffff" stroke="#c0bfbc" stroke-width="1"/>
+  <g clip-path="url(#photo)">
+    <rect x="16" y="22" width="96" height="74" fill="url(#sky)"/>
+    <circle cx="88" cy="42" r="9" fill="#f9f06b"/>
+    <path d="M16 82 L44 50 L66 74 L80 62 L112 92 L112 96 L16 96 Z" fill="url(#back-mountain)"/>
+    <path d="M16 96 L16 86 L36 70 L58 96 Z" fill="url(#front-mountain)"/>
+    <path d="M44 50 L37 58 L44 55 L51 58 Z" fill="#ffffff" opacity="0.85"/>
+  </g>
+
+  <!-- Rating star badge -->
+  <circle cx="98" cy="96" r="24" fill="#ffffff"/>
+  <circle cx="98" cy="96" r="21" fill="#3d3846"/>
+  <path d="M98 80.5 L102.6 89.9 L113 91.4 L105.5 98.7 L107.3 109 L98 104.1 L88.7 109 L90.5 98.7 L83 91.4 L93.4 89.9 Z"
+        fill="url(#star)" stroke="#e5a50a" stroke-width="1" stroke-linejoin="round"/>
+</svg>
