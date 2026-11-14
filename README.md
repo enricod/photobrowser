@@ -20,6 +20,9 @@ sudo apt install -y pkg-config clang libclang-dev libgtk-4-dev libadwaita-1-dev 
   libraw-dev libgexiv2-dev libturbojpeg0-dev libsqlite3-dev
 ```
 
+libadwaita 1.8 or newer is required (for the Keyboard Shortcuts dialog); check
+with `pkg-config --modversion libadwaita-1`.
+
 Either gexiv2 0.14 (`gexiv2`) or 0.16 (`gexiv2-0.16`) works; `build.rs` picks
 whichever is installed. Then:
 
@@ -61,6 +64,7 @@ overrode it) to remove both files again.
 | `Ctrl+Shift+M` | Move to the last destination |
 | `Ctrl+F` | Focus the filter bar |
 | `Ctrl+A` | Select all visible photos (grid) |
+| `Ctrl+?` | Keyboard shortcuts (also in the main menu) |
 | `Enter`, double-click | Open full view |
 | `←` `→` `Space` `Backspace` | Previous / next (full view) |
 | `Z`, double-click | Fit ↔ 100 % (RAW: full decode) |

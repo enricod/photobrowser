@@ -239,3 +239,16 @@ pub fn organize(state: &Rc<AppState>) {
     dialog.set_child(Some(&toolbar));
     dialog.present(Some(&state.widgets().window));
 }
+
+/// The standard GNOME Keyboard Shortcuts dialog, from `keys::SHORTCUTS`.
+pub fn shortcuts(state: &Rc<AppState>) {
+    let dialog = adw::ShortcutsDialog::new();
+    for section in super::keys::SHORTCUTS {
+        let group = adw::ShortcutsSection::new(Some(section.title));
+        for (title, accels) in section.items {
+            group.add(adw::ShortcutsItem::new(title, accels));
+        }
+        dialog.add(group);
+    }
+    dialog.present(Some(&state.widgets().window));
+}
