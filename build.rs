@@ -28,18 +28,22 @@ fn main() {
         .expect("could not write bindings");
 }
 
-/// Debian ships gexiv2 0.16 as `gexiv2-0.16`; Fedora ships 0.14 as `gexiv2`. `src/gexiv2.rs`
-/// only uses entry points whose signatures match in both.
+/// Debian ships gexiv2 0.16 as `gexiv2-0.16`; Fedora ships 0.14 as `gexiv2`.
+///
+/// 0.16 deprecates the `gexiv2_metadata_try_*` entry points in favour of plain-named ones with
+/// identical signatures (in 0.14 the plain names take no `GError**`). When 0.16 is found we set
+/// `cfg(gexiv2_016)`, and `src/gexiv2.rs` links its `try_*` declarations to the plain names.
 fn link_gexiv2() {
-    let found = pkg_config::Config::new()
+    println!("cargo:rustc-check-cfg=cfg(gexiv2_016)");
+    let v016 = pkg_config::Config::new()
         .atleast_version("0.16")
-        .probe("gexiv2-0.16")
-        .or_else(|_| {
-            pkg_config::Config::new()
-                .atleast_version("0.14")
-                .probe("gexiv2")
-        });
-    if let Err(e) = found {
+        .probe("gexiv2-0.16");
+    if v016.is_ok() {
+        println!("cargo:rustc-cfg=gexiv2_016");
+    } else if let Err(e) = pkg_config::Config::new()
+        .atleast_version("0.14")
+        .probe("gexiv2")
+    {
         panic!(
             "gexiv2 not found (install libgexiv2_0.14-devel on Fedora or libgexiv2-dev on Debian): {e}"
         );

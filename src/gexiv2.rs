@@ -42,6 +42,9 @@ mod sys {
     pub type GBoolean = c_int;
     pub const GEXIV2_LOG_LEVEL_MUTE: c_int = 4;
 
+    // The `try_*` names exist in both 0.14 and 0.16, but 0.16 deprecates them in favour of
+    // plain names with identical signatures. Under `cfg(gexiv2_016)` (set by build.rs) each
+    // `try_*` declaration links to the plain symbol, so call sites stay version-agnostic.
     unsafe extern "C" {
         pub fn g_object_unref(object: *mut c_void);
         pub fn g_free(mem: *mut c_void);
@@ -49,6 +52,7 @@ mod sys {
 
         pub fn gexiv2_initialize() -> GBoolean;
         pub fn gexiv2_log_set_level(level: c_int);
+        #[cfg_attr(gexiv2_016, link_name = "gexiv2_metadata_register_xmp_namespace")]
         pub fn gexiv2_metadata_try_register_xmp_namespace(
             name: *const c_char,
             prefix: *const c_char,
@@ -73,42 +77,50 @@ mod sys {
             error: *mut *mut GError,
         ) -> GBoolean;
 
+        #[cfg_attr(gexiv2_016, link_name = "gexiv2_metadata_has_tag")]
         pub fn gexiv2_metadata_try_has_tag(
             this: *mut GExiv2Metadata,
             tag: *const c_char,
             error: *mut *mut GError,
         ) -> GBoolean;
+        #[cfg_attr(gexiv2_016, link_name = "gexiv2_metadata_get_tag_string")]
         pub fn gexiv2_metadata_try_get_tag_string(
             this: *mut GExiv2Metadata,
             tag: *const c_char,
             error: *mut *mut GError,
         ) -> *mut c_char;
+        #[cfg_attr(gexiv2_016, link_name = "gexiv2_metadata_set_tag_string")]
         pub fn gexiv2_metadata_try_set_tag_string(
             this: *mut GExiv2Metadata,
             tag: *const c_char,
             value: *const c_char,
             error: *mut *mut GError,
         ) -> GBoolean;
+        #[cfg_attr(gexiv2_016, link_name = "gexiv2_metadata_get_tag_long")]
         pub fn gexiv2_metadata_try_get_tag_long(
             this: *mut GExiv2Metadata,
             tag: *const c_char,
             error: *mut *mut GError,
         ) -> c_long;
 
+        #[cfg_attr(gexiv2_016, link_name = "gexiv2_metadata_get_exposure_time")]
         pub fn gexiv2_metadata_try_get_exposure_time(
             this: *mut GExiv2Metadata,
             nom: *mut c_int,
             den: *mut c_int,
             error: *mut *mut GError,
         ) -> GBoolean;
+        #[cfg_attr(gexiv2_016, link_name = "gexiv2_metadata_get_fnumber")]
         pub fn gexiv2_metadata_try_get_fnumber(
             this: *mut GExiv2Metadata,
             error: *mut *mut GError,
         ) -> c_double;
+        #[cfg_attr(gexiv2_016, link_name = "gexiv2_metadata_get_iso_speed")]
         pub fn gexiv2_metadata_try_get_iso_speed(
             this: *mut GExiv2Metadata,
             error: *mut *mut GError,
         ) -> c_int;
+        #[cfg_attr(gexiv2_016, link_name = "gexiv2_metadata_get_focal_length")]
         pub fn gexiv2_metadata_try_get_focal_length(
             this: *mut GExiv2Metadata,
             error: *mut *mut GError,
@@ -122,6 +134,7 @@ mod sys {
         pub fn gexiv2_preview_properties_get_extension(
             this: *mut GExiv2PreviewProperties,
         ) -> *const c_char;
+        #[cfg_attr(gexiv2_016, link_name = "gexiv2_metadata_get_preview_image")]
         pub fn gexiv2_metadata_try_get_preview_image(
             this: *mut GExiv2Metadata,
             props: *mut GExiv2PreviewProperties,
