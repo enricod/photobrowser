@@ -37,12 +37,18 @@ fn check(code: c_int) -> Result<(), LibRawError> {
     Err(LibRawError::Code(msg.to_string_lossy().into_owned()))
 }
 
-/// LibRaw `sizes.flip` → EXIF orientation.
+/// LibRaw `sizes.flip` → EXIF orientation. LibRaw derives `flip` from the EXIF orientation as
+/// `"50132467"[orientation & 7]`; this is the inverse, mirrored orientations (2, 4, 5, 7)
+/// included. Unknown values count as upright.
 pub fn flip_to_orientation(flip: i32) -> u8 {
     match flip {
+        1 => 2,
+        2 => 4,
         3 => 3,
+        4 => 5,
         5 => 8,
         6 => 6,
+        7 => 7,
         _ => 1,
     }
 }
@@ -166,10 +172,30 @@ mod tests {
 
     #[test]
     fn maps_flip_to_exif_orientation() {
-        assert_eq!(flip_to_orientation(0), 1);
-        assert_eq!(flip_to_orientation(3), 3);
-        assert_eq!(flip_to_orientation(5), 8);
-        assert_eq!(flip_to_orientation(6), 6);
+        let expected = [
+            (0, 1),
+            (1, 2),
+            (2, 4),
+            (3, 3),
+            (4, 5),
+            (5, 8),
+            (6, 6),
+            (7, 7),
+        ];
+        for (flip, orientation) in expected {
+            assert_eq!(flip_to_orientation(flip), orientation, "flip {flip}");
+        }
+        assert_eq!(flip_to_orientation(-1), 1);
+        assert_eq!(flip_to_orientation(8), 1);
+    }
+
+    /// Round-trips every EXIF orientation through LibRaw's own EXIF → flip formula.
+    #[test]
+    fn inverts_libraw_flip_formula() {
+        for orientation in 1u8..=8 {
+            let flip = (b"50132467"[usize::from(orientation & 7)] - b'0') as i32;
+            assert_eq!(flip_to_orientation(flip), orientation, "EXIF {orientation}");
+        }
     }
 
     #[test]
