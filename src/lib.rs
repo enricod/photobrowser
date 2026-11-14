@@ -9,6 +9,7 @@ pub mod index;
 pub mod jobs;
 pub mod libraw;
 pub mod media;
+pub mod organize;
 pub mod thumbcache;
 pub mod ui;
 pub mod xmp;

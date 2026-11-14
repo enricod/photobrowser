@@ -8,6 +8,60 @@ use super::state::AppState;
 use crate::catalog::rating::RatingChange;
 use crate::fileops::OpKind;
 
+/// A group in the Keyboard Shortcuts dialog: (description, accelerators) pairs, in
+/// `gtk_accelerator_parse` syntax (alternatives separated by spaces, ranges with "...").
+/// Keep in sync with `handle` below.
+pub struct ShortcutSection {
+    pub title: &'static str,
+    pub items: &'static [(&'static str, &'static str)],
+}
+
+pub const SHORTCUTS: &[ShortcutSection] = &[
+    ShortcutSection {
+        title: "General",
+        items: &[
+            ("Open folder", "<Control>o"),
+            ("Focus the filter bar", "<Control>f"),
+            ("Select all visible photos", "<Control>a"),
+            ("Keyboard shortcuts", "<Control>question"),
+        ],
+    },
+    ShortcutSection {
+        title: "Rating",
+        items: &[
+            ("Set rating", "1...5"),
+            ("Clear rating", "0"),
+            ("Toggle reject", "x"),
+        ],
+    },
+    ShortcutSection {
+        title: "Files",
+        items: &[
+            ("Move to folder…", "m"),
+            ("Copy to folder…", "c"),
+            ("Move to the last destination", "<Control><Shift>m"),
+        ],
+    },
+    ShortcutSection {
+        title: "Grid",
+        items: &[
+            ("Open the full view (or double-click)", "Return"),
+            ("Thumbnail size (or Ctrl+scroll)", "plus minus"),
+        ],
+    },
+    ShortcutSection {
+        title: "Full View",
+        items: &[
+            ("Next photo", "Right Down space"),
+            ("Previous photo", "Left Up BackSpace"),
+            ("Fit ↔ 100 % (or double-click)", "z"),
+            ("Info overlay", "i"),
+            ("Filmstrip", "f"),
+            ("Back to the grid", "Escape"),
+        ],
+    },
+];
+
 pub fn handle(state: &Rc<AppState>, key: gdk::Key, mods: gdk::ModifierType) -> glib::Propagation {
     if state.widgets().window.visible_dialog().is_some() {
         return glib::Propagation::Proceed;
@@ -42,6 +96,8 @@ fn handle_common(
     match (ctrl, ch) {
         (true, Some('o')) => state.choose_folder(),
         (true, Some('f')) => state.focus_filters(),
+        (true, Some('a')) if !shift && !state.viewer_active() => state.select_all(),
+        (true, Some('?')) => dialogs::shortcuts(state),
         (true, Some('m')) if shift => state.move_to_last(),
         (false, Some(c @ '0'..='5')) => state.rate(RatingChange::Set(c as u8 - b'0')),
         (false, Some('x')) => state.rate(RatingChange::ToggleReject),
@@ -52,4 +108,31 @@ fn handle_common(
         _ => return glib::Propagation::Proceed,
     }
     glib::Propagation::Stop
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn shortcut_table_is_complete_and_unambiguous() {
+        let mut seen = HashSet::new();
+        for section in SHORTCUTS {
+            assert!(!section.title.is_empty());
+            assert!(!section.items.is_empty(), "{}", section.title);
+            for (title, accels) in section.items {
+                assert!(!title.is_empty());
+                for accel in accels.split(' ') {
+                    assert!(!accel.is_empty(), "{title}: {accels:?}");
+                    // The same key may mean different things in the grid and the full view
+                    // (e.g. F), but never twice in one context.
+                    assert!(
+                        seen.insert((section.title == "Full View", accel)),
+                        "{accel} listed twice"
+                    );
+                }
+            }
+        }
+    }
 }

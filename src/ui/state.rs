@@ -26,6 +26,7 @@ use crate::filter::{self, FilterState, SortState};
 use crate::index::{FileRecord, Index};
 use crate::jobs::{CancelToken, JobPool, Priority};
 use crate::media::{Item, ItemId, MediaFile};
+use crate::organize::{self, OrganizePattern};
 use crate::thumbcache::DiskCache;
 use crate::xmp;
 
@@ -68,8 +69,7 @@ pub enum Msg {
         outcome: TransferOutcome,
     },
     TransfersFinished {
-        kind: OpKind,
-        dest: PathBuf,
+        batch: BatchInfo,
         done: usize,
         skipped: usize,
         failed: usize,
@@ -168,10 +168,69 @@ fn capacity(n: usize) -> NonZeroUsize {
 /// A move/copy batch that was accepted (ids already marked `transferring`) but is still
 /// waiting for its source paths to clear `xmp_inflight` before the transfer thread spawns.
 struct PendingBatch {
-    jobs: Vec<(ItemId, Vec<PathBuf>)>,
-    dest: PathBuf,
-    kind: OpKind,
+    jobs: Vec<TransferJob>,
+    batch: BatchInfo,
     policy: ConflictPolicy,
+}
+
+/// One item of a move/copy batch and the folder it goes to.
+#[derive(Debug, Clone)]
+pub struct TransferJob {
+    pub id: ItemId,
+    pub sources: Vec<PathBuf>,
+    pub dest: PathBuf,
+}
+
+/// What a batch is, for its messages: a move/copy into `target`, or organizing into dated
+/// folders under `target` (`undated` items were left out for lack of a shot date).
+#[derive(Debug, Clone)]
+pub struct BatchInfo {
+    pub kind: OpKind,
+    pub target: PathBuf,
+    pub organize: bool,
+    pub undated: usize,
+}
+
+impl BatchInfo {
+    fn destination_text(&self) -> String {
+        if self.organize {
+            format!("into dated folders under {}", display_dir(&self.target))
+        } else {
+            format!("to {}", display_dir(&self.target))
+        }
+    }
+
+    fn started_text(&self, items: usize) -> String {
+        let verb = match self.kind {
+            OpKind::Move => "Moving",
+            OpKind::Copy => "Copying",
+        };
+        format!(
+            "{verb} {items} item{} {}…",
+            if items == 1 { "" } else { "s" },
+            self.destination_text()
+        )
+    }
+
+    /// Summary without the failure details, which the caller appends.
+    fn finished_text(&self, done: usize, skipped: usize) -> String {
+        let verb = match self.kind {
+            OpKind::Move => "Moved",
+            OpKind::Copy => "Copied",
+        };
+        let mut text = format!(
+            "{verb} {done} item{} {}",
+            if done == 1 { "" } else { "s" },
+            self.destination_text()
+        );
+        if skipped > 0 {
+            text.push_str(&format!(", {skipped} skipped"));
+        }
+        if self.undated > 0 {
+            text.push_str(&format!(", {} without a shot date", self.undated));
+        }
+        text
+    }
 }
 
 /// Media paths of the items in running or pending move/copy batches, by item id.
@@ -199,6 +258,15 @@ impl InFlight {
     }
 }
 
+/// The batch job for `obj`'s files going into `dest`.
+fn transfer_job(obj: &ItemObject, dest: PathBuf) -> TransferJob {
+    obj.with_item(|i| TransferJob {
+        id: i.id,
+        sources: i.files.iter().map(|f| f.path.clone()).collect(),
+        dest,
+    })
+}
+
 /// Marker `fileops` puts in a failure message when undoing a partial transfer failed.
 const ROLLBACK_INCOMPLETE: &str = "rollback incomplete";
 
@@ -209,9 +277,9 @@ const ROLLBACK_INCOMPLETE: &str = "rollback incomplete";
 /// writer then recreates it at the old, now-orphaned path), or the writer's save can land
 /// at the old path after the file itself was already renamed away. Waiting until every
 /// source path is clear avoids both races.
-fn batch_ready(jobs: &[(ItemId, Vec<PathBuf>)], inflight: &HashMap<PathBuf, u32>) -> bool {
+fn batch_ready(jobs: &[TransferJob], inflight: &HashMap<PathBuf, u32>) -> bool {
     jobs.iter()
-        .all(|(_, paths)| paths.iter().all(|p| !inflight.contains_key(p)))
+        .all(|j| j.sources.iter().all(|p| !inflight.contains_key(p)))
 }
 
 pub fn texture_from(img: Rgba) -> gdk::Texture {
@@ -416,16 +484,14 @@ impl AppState {
             Msg::Exif { id, info } => self.on_exif(id, info),
             Msg::Transferred { id, kind, outcome } => self.on_transferred(id, kind, outcome),
             Msg::TransfersFinished {
-                kind,
-                dest,
+                batch,
                 done,
                 skipped,
                 failed,
                 first_failure,
                 rollback_failures,
             } => self.on_transfers_finished(
-                kind,
-                &dest,
+                &batch,
                 done,
                 skipped,
                 failed,
@@ -902,6 +968,13 @@ impl AppState {
             let s = self.clone();
             glib::idle_add_local_once(move || s.refilter());
         }
+    }
+
+    /// Selects every photo the grid shows (hidden ones, e.g. filtered-out rejects, stay
+    /// unselected so a following move or organize never touches what you can't see).
+    /// Handled at window level: GTK's own Ctrl+A only works while the grid has focus.
+    pub fn select_all(&self) {
+        self.selection.select_all();
     }
 
     pub fn focus_filters(&self) {
@@ -1420,41 +1493,103 @@ impl AppState {
     }
 
     pub fn start_transfer(self: &Rc<Self>, targets: Vec<ItemObject>, dest: PathBuf, kind: OpKind) {
-        let (targets, dropped_transferring) = {
-            let mut kept = Vec::with_capacity(targets.len());
-            let mut dropped = false;
-            for o in targets {
-                if self.is_transferring(&o) {
-                    dropped = true;
-                } else {
-                    kept.push(o);
-                }
-            }
-            (kept, dropped)
+        let Some(targets) = self.drop_transferring(targets) else {
+            return;
         };
-        if targets.is_empty() {
-            if dropped_transferring {
+        let jobs = targets
+            .iter()
+            .map(|o| transfer_job(o, dest.clone()))
+            .collect();
+        let batch = BatchInfo {
+            kind,
+            target: dest,
+            organize: false,
+            undated: 0,
+        };
+        self.start_jobs(jobs, batch);
+    }
+
+    /// Moves or copies the items into dated folders under `root` (see `organize`). Items
+    /// without a shot date are left where they are and counted in the messages.
+    pub fn start_organize(self: &Rc<Self>, targets: Vec<ItemObject>, root: PathBuf, kind: OpKind) {
+        let Some(targets) = self.drop_transferring(targets) else {
+            return;
+        };
+        let dates = self.shot_dates(&targets);
+        let plan = organize::plan(&dates, &root, OrganizePattern::default());
+        let jobs: Vec<TransferJob> = targets
+            .iter()
+            .zip(plan.destinations)
+            .filter_map(|(o, dest)| Some(transfer_job(o, dest?)))
+            .collect();
+        if jobs.is_empty() {
+            self.toast("None of the selected photos has a shot date");
+            return;
+        }
+        let batch = BatchInfo {
+            kind,
+            target: root,
+            organize: true,
+            undated: plan.undated,
+        };
+        self.start_jobs(jobs, batch);
+    }
+
+    /// Each item's shot date (see `organize::shot_date`), from the index.
+    pub fn shot_dates(&self, targets: &[ItemObject]) -> Vec<Option<chrono::NaiveDate>> {
+        let index = self.index.borrow();
+        targets
+            .iter()
+            .map(|o| {
+                o.with_item(|i| {
+                    organize::shot_date(i.files.iter().map(|f| {
+                        index
+                            .get(&f.path)
+                            .ok()
+                            .flatten()
+                            .and_then(|r| r.capture_time)
+                    }))
+                })
+            })
+            .collect()
+    }
+
+    /// The targets not already in a running move/copy; `None` (after telling the user, if
+    /// that was the reason) when nothing is left.
+    fn drop_transferring(&self, targets: Vec<ItemObject>) -> Option<Vec<ItemObject>> {
+        let total = targets.len();
+        let kept: Vec<ItemObject> = targets
+            .into_iter()
+            .filter(|o| !self.is_transferring(o))
+            .collect();
+        if kept.is_empty() {
+            if total > 0 {
                 self.toast("Already being moved");
             }
-            return;
+            return None;
         }
-        let jobs: Vec<(ItemId, Vec<PathBuf>)> = targets
-            .iter()
-            .map(|o| o.with_item(|i| (i.id, i.files.iter().map(|f| f.path.clone()).collect())))
-            .collect();
+        Some(kept)
+    }
+
+    /// Asks how to handle name clashes (if any), then runs the batch.
+    fn start_jobs(self: &Rc<Self>, jobs: Vec<TransferJob>, batch: BatchInfo) {
         let conflicts = jobs
             .iter()
-            .filter(|(_, src)| fileops::has_conflict(src, &dest))
+            .filter(|j| fileops::has_conflict(&j.sources, &j.dest))
             .count();
         if conflicts == 0 {
-            self.accept_batch(jobs, dest, kind, ConflictPolicy::Skip);
+            self.accept_batch(jobs, batch, ConflictPolicy::Skip);
             return;
         }
+        let place = if batch.organize {
+            format!("their dated folders under “{}”", batch.target.display())
+        } else {
+            format!("“{}”", batch.target.display())
+        };
         let body = format!(
-            "{conflicts} of {} item{} already exist in “{}”.",
+            "{conflicts} of {} item{} already exist in {place}.",
             jobs.len(),
             if jobs.len() == 1 { "" } else { "s" },
-            dest.display()
         );
         let dialog = adw::AlertDialog::new(Some("Files Already Exist"), Some(&body));
         dialog.add_responses(&[
@@ -1472,7 +1607,7 @@ impl AppState {
                 "rename" => ConflictPolicy::Rename,
                 _ => return,
             };
-            s.accept_batch(jobs.clone(), dest.clone(), kind, policy);
+            s.accept_batch(jobs.clone(), batch.clone(), policy);
         });
         dialog.present(Some(&self.widgets().window));
     }
@@ -1482,21 +1617,20 @@ impl AppState {
     /// waits for any of their paths still queued for an XMP write before actually running.
     fn accept_batch(
         self: &Rc<Self>,
-        jobs: Vec<(ItemId, Vec<PathBuf>)>,
-        dest: PathBuf,
-        kind: OpKind,
+        jobs: Vec<TransferJob>,
+        batch: BatchInfo,
         policy: ConflictPolicy,
     ) {
         {
             let mut transferring = self.transferring.borrow_mut();
-            for (id, paths) in &jobs {
-                transferring.add(*id, paths.clone());
+            for job in &jobs {
+                transferring.add(job.id, job.sources.clone());
             }
         }
         self.batches_active.set(self.batches_active.get() + 1);
         self.transfer_items_left
             .set(self.transfer_items_left.get() + jobs.len());
-        self.wait_then_run(jobs, dest, kind, policy);
+        self.wait_then_run(jobs, batch, policy);
     }
 
     /// Runs the batch immediately if none of its source paths are queued for an XMP write;
@@ -1506,20 +1640,18 @@ impl AppState {
     /// the writer recreate an orphaned sidecar at the old (now-vacated) path.
     fn wait_then_run(
         self: &Rc<Self>,
-        jobs: Vec<(ItemId, Vec<PathBuf>)>,
-        dest: PathBuf,
-        kind: OpKind,
+        jobs: Vec<TransferJob>,
+        batch: BatchInfo,
         policy: ConflictPolicy,
     ) {
         if batch_ready(&jobs, &self.xmp_inflight.borrow()) {
-            self.run_transfer(jobs, dest, kind, policy);
+            self.run_transfer(jobs, batch, policy);
             return;
         }
         let s = self.clone();
         let pending = RefCell::new(Some(PendingBatch {
             jobs,
-            dest,
-            kind,
+            batch,
             policy,
         }));
         glib::timeout_add_local(Duration::from_millis(50), move || {
@@ -1531,7 +1663,7 @@ impl AppState {
                 return glib::ControlFlow::Continue;
             }
             if let Some(b) = pending.borrow_mut().take() {
-                s.run_transfer(b.jobs, b.dest, b.kind, b.policy);
+                s.run_transfer(b.jobs, b.batch, b.policy);
             }
             glib::ControlFlow::Break
         });
@@ -1539,26 +1671,23 @@ impl AppState {
 
     fn run_transfer(
         self: &Rc<Self>,
-        jobs: Vec<(ItemId, Vec<PathBuf>)>,
-        dest: PathBuf,
-        kind: OpKind,
+        jobs: Vec<TransferJob>,
+        batch: BatchInfo,
         policy: ConflictPolicy,
     ) {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        let _ = self.index.borrow().add_recent_destination(&dest, now);
-        let verb = match kind {
-            OpKind::Move => "Moving",
-            OpKind::Copy => "Copying",
-        };
-        self.toast(&format!(
-            "{verb} {} item{} to {}…",
-            jobs.len(),
-            if jobs.len() == 1 { "" } else { "s" },
-            display_dir(&dest)
-        ));
+        // Organizing spreads items over dated folders: those are not "recent destinations".
+        if !batch.organize {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let _ = self
+                .index
+                .borrow()
+                .add_recent_destination(&batch.target, now);
+        }
+        self.toast(&batch.started_text(jobs.len()));
+        let kind = batch.kind;
         let tx = self.tx.clone();
         std::thread::Builder::new()
             .name("pb-fileops".into())
@@ -1566,11 +1695,20 @@ impl AppState {
                 let (mut done, mut skipped, mut failed) = (0, 0, 0);
                 let mut first_failure: Option<String> = None;
                 let mut rollback_failures: Vec<String> = Vec::new();
-                for (id, sources) in jobs {
+                for job in jobs {
                     // A panic must still end the batch with `TransfersFinished`: closing
                     // the window waits for it.
                     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        fileops::transfer_item(&sources, &dest, kind, policy)
+                        if batch.organize {
+                            fileops::transfer_item_creating_dest(
+                                &job.sources,
+                                &job.dest,
+                                kind,
+                                policy,
+                            )
+                        } else {
+                            fileops::transfer_item(&job.sources, &job.dest, kind, policy)
+                        }
                     }))
                     .unwrap_or_else(|_| {
                         TransferOutcome::Failed("internal error during transfer".into())
@@ -1589,11 +1727,14 @@ impl AppState {
                             }
                         }
                     }
-                    let _ = tx.send_blocking(Msg::Transferred { id, kind, outcome });
+                    let _ = tx.send_blocking(Msg::Transferred {
+                        id: job.id,
+                        kind,
+                        outcome,
+                    });
                 }
                 let _ = tx.send_blocking(Msg::TransfersFinished {
-                    kind,
-                    dest,
+                    batch,
                     done,
                     skipped,
                     failed,
@@ -1679,8 +1820,7 @@ impl AppState {
     #[allow(clippy::too_many_arguments)]
     fn on_transfers_finished(
         self: &Rc<Self>,
-        kind: OpKind,
-        dest: &std::path::Path,
+        batch: &BatchInfo,
         done: usize,
         skipped: usize,
         failed: usize,
@@ -1689,18 +1829,7 @@ impl AppState {
     ) {
         self.batches_active
             .set(self.batches_active.get().saturating_sub(1));
-        let verb = match kind {
-            OpKind::Move => "Moved",
-            OpKind::Copy => "Copied",
-        };
-        let mut text = format!(
-            "{verb} {done} item{} to {}",
-            if done == 1 { "" } else { "s" },
-            display_dir(dest)
-        );
-        if skipped > 0 {
-            text.push_str(&format!(", {skipped} skipped"));
-        }
+        let mut text = batch.finished_text(done, skipped);
         if failed > 0 {
             text.push_str(&format!(", {failed} failed"));
             if let Some(msg) = first_failure {
@@ -1830,8 +1959,12 @@ fn viewer_fallback(current_visible: bool, last_pos: Option<u32>, n: u32) -> View
 mod tests {
     use super::*;
 
-    fn jobs(paths: Vec<&str>) -> Vec<(ItemId, Vec<PathBuf>)> {
-        vec![(1, paths.into_iter().map(PathBuf::from).collect())]
+    fn jobs(paths: Vec<&str>) -> Vec<TransferJob> {
+        vec![TransferJob {
+            id: 1,
+            sources: paths.into_iter().map(PathBuf::from).collect(),
+            dest: PathBuf::from("/dest"),
+        }]
     }
 
     fn rated(index: &Index, path: &str) {
@@ -1961,6 +2094,45 @@ mod tests {
         t.finish(7);
         t.finish(7);
         assert!(t.paths().is_empty());
+    }
+
+    fn batch(kind: OpKind, organize: bool, undated: usize) -> BatchInfo {
+        BatchInfo {
+            kind,
+            target: PathBuf::from("/srv/photos"),
+            organize,
+            undated,
+        }
+    }
+
+    #[test]
+    fn move_and_copy_messages_are_unchanged() {
+        let b = batch(OpKind::Move, false, 0);
+        assert_eq!(b.started_text(1), "Moving 1 item to /srv/photos…");
+        assert_eq!(
+            b.finished_text(3, 1),
+            "Moved 3 items to /srv/photos, 1 skipped"
+        );
+        let c = batch(OpKind::Copy, false, 0);
+        assert_eq!(c.started_text(2), "Copying 2 items to /srv/photos…");
+    }
+
+    #[test]
+    fn organize_messages_name_the_root_and_undated_items() {
+        let b = batch(OpKind::Move, true, 3);
+        assert_eq!(
+            b.started_text(39),
+            "Moving 39 items into dated folders under /srv/photos…"
+        );
+        assert_eq!(
+            b.finished_text(39, 0),
+            "Moved 39 items into dated folders under /srv/photos, 3 without a shot date"
+        );
+        let c = batch(OpKind::Copy, true, 0);
+        assert_eq!(
+            c.finished_text(1, 2),
+            "Copied 1 item into dated folders under /srv/photos, 2 skipped"
+        );
     }
 
     #[test]
