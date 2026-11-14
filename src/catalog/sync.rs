@@ -20,7 +20,19 @@ pub struct ScanResult {
 }
 
 pub fn scan_folder(folder: &Path, known: &HashMap<PathBuf, FileRecord>) -> io::Result<ScanResult> {
-    let files = list_media_files(folder)?;
+    let listing = list_media_files(folder)?;
+    let mut files = listing.files;
+    // Known files the listing could not check are kept exactly as recorded (shown, rating
+    // intact, not removed) until a later scan can read them.
+    let seen: HashSet<PathBuf> = files.iter().map(|f| f.path.clone()).collect();
+    let unreadable: HashSet<&PathBuf> = listing.unreadable.iter().collect();
+    files.extend(
+        known
+            .values()
+            .filter(|r| !seen.contains(&r.path))
+            .filter(|r| listing.incomplete || unreadable.contains(&r.path))
+            .filter_map(as_recorded),
+    );
     let mut records: HashMap<PathBuf, FileRecord> = HashMap::with_capacity(files.len());
     let mut changed: HashSet<PathBuf> = HashSet::new();
 
@@ -67,6 +79,16 @@ pub fn scan_folder(folder: &Path, known: &HashMap<PathBuf, FileRecord>) -> io::R
         items,
         upserts,
         removed,
+    })
+}
+
+/// The file as last recorded in the index, for keeping one the scan could not read.
+fn as_recorded(rec: &FileRecord) -> Option<MediaFile> {
+    Some(MediaFile {
+        path: rec.path.clone(),
+        kind: FileKind::from_path(&rec.path)?,
+        size: rec.size,
+        mtime_ns: rec.mtime_ns,
     })
 }
 
@@ -217,6 +239,24 @@ mod tests {
         assert_eq!(second.upserts.len(), 1);
         assert_eq!(second.upserts[0].size, 14);
         assert_eq!(second.upserts[0].rating, 4);
+        assert_eq!(second.items[0].rating, 4);
+    }
+
+    #[test]
+    fn unreadable_file_is_kept_not_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = touch(dir.path(), "a.jpg", b"x");
+        let first = scan_folder(dir.path(), &HashMap::new()).unwrap();
+        let mut known = known_from(&first);
+        known.get_mut(&a).unwrap().rating = 4;
+        // Replace the file with a self-referencing symlink: metadata fails with ELOOP, a
+        // stand-in for a transient I/O error.
+        fs::remove_file(&a).unwrap();
+        std::os::unix::fs::symlink(&a, &a).unwrap();
+        let second = scan_folder(dir.path(), &known).unwrap();
+        assert!(second.removed.is_empty(), "{:?}", second.removed);
+        assert!(second.upserts.is_empty());
+        assert_eq!(second.items.len(), 1);
         assert_eq!(second.items[0].rating, 4);
     }
 
