@@ -97,9 +97,10 @@ pub fn build(app: &adw::Application, start_folder: Option<PathBuf>) {
         button.connect_clicked(move |_| s.choose_folder());
     }
     let s = state.clone();
-    state
-        .selection
-        .connect_items_changed(move |_, _, _, _| s.update_counter());
+    state.selection.connect_items_changed(move |_, _, _, _| {
+        s.update_counter();
+        s.queue_viewer_sync();
+    });
 
     let s = state.clone();
     state.selection.connect_selection_changed(move |_, _, _| {

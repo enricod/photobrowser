@@ -128,8 +128,11 @@ pub struct AppState {
     xmp_failures: Cell<u32>,
     /// Pending debounced config-file write, if any (see `zoom_thumbs`).
     config_save_source: RefCell<Option<glib::SourceId>>,
-    /// Viewer position to resume at once an in-flight transfer finishes.
-    viewer_resume: Cell<Option<u32>>,
+    /// Position `show_at` last displayed: where the viewer continues if its item leaves
+    /// the visible list (see `sync_viewer`).
+    viewer_pos: Cell<Option<u32>>,
+    /// A `sync_viewer` run is already queued for this burst of list changes.
+    viewer_sync_queued: Cell<bool>,
     /// Ids currently accepted into a move/copy batch (spawned or waiting on XMP writes to
     /// drain): `rate()` and `start_transfer()` both skip them to avoid racing the transfer.
     transferring: RefCell<HashSet<ItemId>>,
@@ -288,7 +291,8 @@ impl AppState {
             xmp_inflight: RefCell::default(),
             xmp_failures: Cell::new(0),
             config_save_source: RefCell::new(None),
-            viewer_resume: Cell::new(None),
+            viewer_pos: Cell::new(None),
+            viewer_sync_queued: Cell::new(false),
             transferring: RefCell::default(),
             batches_active: Cell::new(0),
             transfer_items_left: Cell::new(0),
@@ -881,17 +885,54 @@ impl AppState {
     pub fn current_position(&self) -> Option<u32> {
         if self.viewer_active()
             && let Some(id) = self.widgets().viewer.current_id()
-            && let Some(pos) = (0..self.selection.n_items()).find(|&i| {
-                self.selection
-                    .item(i)
-                    .and_downcast::<ItemObject>()
-                    .is_some_and(|o| o.id() == id)
-            })
+            && let Some(pos) = self.visible_position(id)
         {
             return Some(pos);
         }
         let set = self.selection.selection();
         (!set.is_empty()).then(|| set.minimum())
+    }
+
+    /// Position of `id` in the visible (filtered, sorted) list.
+    fn visible_position(&self, id: ItemId) -> Option<u32> {
+        (0..self.selection.n_items()).find(|&i| {
+            self.selection
+                .item(i)
+                .and_downcast::<ItemObject>()
+                .is_some_and(|o| o.id() == id)
+        })
+    }
+
+    /// Called on every change to the visible list. Coalesces a burst of changes (a batch
+    /// move, a rescan) into one `sync_viewer` run once GTK has finished updating the model.
+    pub fn queue_viewer_sync(self: &Rc<Self>) {
+        if self.viewer_sync_queued.replace(true) {
+            return;
+        }
+        let s = self.clone();
+        glib::idle_add_local_once(move || {
+            s.viewer_sync_queued.set(false);
+            s.sync_viewer();
+        });
+    }
+
+    /// Keeps the viewer on an item that is still in the visible list. When its item was
+    /// moved, removed by a rescan or hidden by a filter, it shows the item now at that
+    /// position (the next one), or closes when the list is empty.
+    fn sync_viewer(self: &Rc<Self>) {
+        if !self.viewer_active() {
+            return;
+        }
+        let visible = self
+            .widgets()
+            .viewer
+            .current_id()
+            .is_some_and(|id| self.visible_position(id).is_some());
+        match viewer_fallback(visible, self.viewer_pos.get(), self.selection.n_items()) {
+            ViewerFallback::Keep => {}
+            ViewerFallback::Show(pos) => self.show_at(pos),
+            ViewerFallback::Close => self.close_viewer(),
+        }
     }
 
     pub fn open_viewer(self: &Rc<Self>, pos: u32) {
@@ -900,8 +941,6 @@ impl AppState {
     }
 
     pub fn close_viewer(&self) {
-        // Nothing to resume once the viewer is gone.
-        self.viewer_resume.set(None);
         let w = self.widgets();
         let pos = self.current_position(); // while still active: the viewed item
         w.stack.set_visible_child_name("grid");
@@ -922,6 +961,7 @@ impl AppState {
         let text = self.info_for(&obj);
         // Set before selecting, so `follow_selection` sees the selection already matching.
         viewer.set_current(&obj, &text);
+        self.viewer_pos.set(Some(pos));
         self.selection.select_item(pos, true);
         viewer.scroll_strip_to(pos);
 
@@ -1162,9 +1202,11 @@ impl AppState {
     pub fn rate(self: &Rc<Self>, change: RatingChange) {
         let targets: Vec<ItemObject> = {
             let transferring = self.transferring.borrow();
+            // `objects` check: a stale object (e.g. one the viewer still holds after it left
+            // the folder) must never write a rating to its vacated path.
             self.rating_targets()
                 .into_iter()
-                .filter(|o| !transferring.contains(&o.id()))
+                .filter(|o| !transferring.contains(&o.id()) && self.object(o.id()).is_some())
                 .collect()
         };
         if targets.is_empty() {
@@ -1425,19 +1467,15 @@ impl AppState {
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         let _ = self.index.borrow().add_recent_destination(&dest, now);
-        self.viewer_resume.set(if self.viewer_active() {
-            self.current_position()
-        } else {
-            None
-        });
         let verb = match kind {
             OpKind::Move => "Moving",
             OpKind::Copy => "Copying",
         };
         self.toast(&format!(
-            "{verb} {} item{}…",
+            "{verb} {} item{} to {}…",
             jobs.len(),
-            if jobs.len() == 1 { "" } else { "s" }
+            if jobs.len() == 1 { "" } else { "s" },
+            display_dir(&dest)
         ));
         let tx = self.tx.clone();
         std::thread::Builder::new()
@@ -1571,13 +1609,10 @@ impl AppState {
             OpKind::Move => "Moved",
             OpKind::Copy => "Copied",
         };
-        let name = dest
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
         let mut text = format!(
-            "{verb} {done} item{} to “{name}”",
-            if done == 1 { "" } else { "s" }
+            "{verb} {done} item{} to {}",
+            if done == 1 { "" } else { "s" },
+            display_dir(dest)
         );
         if skipped > 0 {
             text.push_str(&format!(", {skipped} skipped"));
@@ -1596,26 +1631,6 @@ impl AppState {
             );
             dialog.add_response("ok", "_OK");
             dialog.present(Some(&self.widgets().window));
-        }
-
-        if let Some(pos) = self.viewer_resume.take()
-            && self.viewer_active()
-        {
-            let n = self.selection.n_items();
-            if n == 0 {
-                self.close_viewer();
-            } else {
-                // `current_position()` still finds the removed object while the viewer holds
-                // its id, so check membership in `objects` directly instead.
-                let current_gone = self
-                    .widgets()
-                    .viewer
-                    .current_id()
-                    .is_some_and(|id| self.object(id).is_none());
-                if current_gone {
-                    self.show_at(pos.min(n - 1));
-                }
-            }
         }
     }
 
@@ -1656,12 +1671,88 @@ impl AppState {
     }
 }
 
+/// A folder path for messages, with the home folder shortened to `~` (e.g. "~/Docs").
+fn display_dir(path: &std::path::Path) -> String {
+    display_dir_with_home(path, &glib::home_dir())
+}
+
+fn display_dir_with_home(path: &std::path::Path, home: &std::path::Path) -> String {
+    // A root or empty home would turn every path into "~/…".
+    if home.parent().is_none() {
+        return path.display().to_string();
+    }
+    // `strip_prefix` compares whole components, so "/home/enrico2" is not under "/home/enrico".
+    match path.strip_prefix(home) {
+        Ok(rest) if rest.as_os_str().is_empty() => "~".to_owned(),
+        Ok(rest) => format!("~/{}", rest.display()),
+        Err(_) => path.display().to_string(),
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ViewerFallback {
+    Keep,
+    Show(u32),
+    Close,
+}
+
+/// What the viewer does after the visible list changed: keep its item if still visible,
+/// else show whatever now sits at its last position (clamped), or close if nothing is left.
+fn viewer_fallback(current_visible: bool, last_pos: Option<u32>, n: u32) -> ViewerFallback {
+    if current_visible {
+        ViewerFallback::Keep
+    } else if n == 0 {
+        ViewerFallback::Close
+    } else {
+        ViewerFallback::Show(last_pos.unwrap_or(0).min(n - 1))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn jobs(paths: Vec<&str>) -> Vec<(ItemId, Vec<PathBuf>)> {
         vec![(1, paths.into_iter().map(PathBuf::from).collect())]
+    }
+
+    #[test]
+    fn display_dir_shortens_home() {
+        let home = std::path::Path::new("/home/enrico");
+        let show = |p: &str| display_dir_with_home(std::path::Path::new(p), home);
+        assert_eq!(show("/home/enrico/Docs"), "~/Docs");
+        assert_eq!(show("/home/enrico/Pictures/2026"), "~/Pictures/2026");
+        assert_eq!(show("/home/enrico"), "~");
+        assert_eq!(show("/run/media/enrico/USB"), "/run/media/enrico/USB");
+        assert_eq!(show("/home/enrico2/x"), "/home/enrico2/x");
+        let root = std::path::Path::new("/");
+        assert_eq!(
+            display_dir_with_home(std::path::Path::new("/srv/x"), root),
+            "/srv/x"
+        );
+    }
+
+    #[test]
+    fn viewer_keeps_a_visible_item() {
+        assert_eq!(viewer_fallback(true, Some(3), 10), ViewerFallback::Keep);
+        assert_eq!(viewer_fallback(true, Some(3), 0), ViewerFallback::Keep);
+    }
+
+    #[test]
+    fn viewer_moves_to_the_item_now_at_its_position() {
+        assert_eq!(viewer_fallback(false, Some(3), 9), ViewerFallback::Show(3));
+        assert_eq!(viewer_fallback(false, None, 5), ViewerFallback::Show(0));
+    }
+
+    #[test]
+    fn viewer_clamps_when_the_last_item_left() {
+        assert_eq!(viewer_fallback(false, Some(9), 9), ViewerFallback::Show(8));
+        assert_eq!(viewer_fallback(false, Some(40), 3), ViewerFallback::Show(2));
+    }
+
+    #[test]
+    fn viewer_closes_when_the_list_is_empty() {
+        assert_eq!(viewer_fallback(false, Some(0), 0), ViewerFallback::Close);
     }
 
     #[test]
