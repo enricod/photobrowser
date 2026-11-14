@@ -7,7 +7,7 @@ use crate::media::mtime_ns;
 
 pub const RATING_TAG: &str = "Xmp.xmp.Rating";
 
-const EMPTY_PACKET: &str = concat!(
+pub(crate) const EMPTY_PACKET: &str = concat!(
     "<?xpacket begin=\"\u{feff}\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>\n",
     "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n",
     " <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n",
@@ -70,7 +70,19 @@ pub fn read_rating(file: &Path) -> Result<Option<XmpRating>, XmpError> {
         return Ok(None);
     }
     let raw = meta.get_tag_string(RATING_TAG)?;
-    Ok(raw.trim().parse::<i32>().ok().map(from_xmp_value))
+    Ok(parse_rating(&raw).map(from_xmp_value))
+}
+
+/// `xmp:Rating` is an XMP Real: most tools write "3", some "3.0". Rounds to the nearest whole
+/// number; anything unparsable is no rating.
+fn parse_rating(raw: &str) -> Option<i32> {
+    let v = raw.trim();
+    v.parse::<i32>().ok().or_else(|| {
+        v.parse::<f64>()
+            .ok()
+            .filter(|f| f.is_finite())
+            .map(|f| f.round() as i32)
+    })
 }
 
 /// Temporary file a sidecar write goes through: hidden (so scans ignore it), same folder
@@ -206,6 +218,31 @@ mod tests {
         let file = dir.path().join("a.jpg");
         fs::write(sidecar_path(&file), EMPTY_PACKET).unwrap();
         assert_eq!(read_rating(&file).unwrap(), None);
+    }
+
+    #[test]
+    fn real_valued_ratings_are_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.jpg");
+        for (value, expected) in [
+            ("3.0", XmpRating::Stars(3)),
+            ("2.6", XmpRating::Stars(3)),
+            ("-1.0", XmpRating::Rejected),
+            ("4", XmpRating::Stars(4)),
+        ] {
+            let packet = EMPTY_PACKET.replace(
+                "xmlns:xmp=\"http://ns.adobe.com/xap/1.0/\"/>",
+                &format!("xmlns:xmp=\"http://ns.adobe.com/xap/1.0/\" xmp:Rating=\"{value}\"/>"),
+            );
+            fs::write(sidecar_path(&file), packet).unwrap();
+            assert_eq!(
+                read_rating(&file).unwrap(),
+                Some(expected),
+                "Rating={value}"
+            );
+        }
+        assert_eq!(parse_rating("NaN"), None);
+        assert_eq!(parse_rating("three"), None);
     }
 
     #[test]

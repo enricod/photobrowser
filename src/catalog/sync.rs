@@ -114,7 +114,9 @@ fn import_sidecar(rec: &mut FileRecord) -> bool {
             rec.rejected = false;
         }
         Ok(Some(XmpRating::Rejected)) => rec.rejected = true,
-        Ok(None) => {}
+        // No rating in it (e.g. written by a geotagger): it says nothing about the rating, so
+        // it must not mark the record as freshly synced and win `reconcile_item` for a pair.
+        Ok(None) => return false,
         Err(e) => {
             eprintln!(
                 "couldn't read sidecar {}: {e}",
@@ -269,6 +271,53 @@ mod tests {
         let second = scan_folder(dir.path(), &known_from(&first)).unwrap();
         assert_eq!(second.removed, vec![a]);
         assert!(second.items.is_empty());
+    }
+
+    #[test]
+    fn ratingless_sidecar_is_not_marked_synced() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = touch(dir.path(), "a.jpg", b"x");
+        let first = scan_folder(dir.path(), &HashMap::new()).unwrap();
+        let mut known = known_from(&first);
+        known.get_mut(&a).unwrap().rating = 3;
+        fs::write(xmp::sidecar_path(&a), xmp::EMPTY_PACKET).unwrap();
+        let second = scan_folder(dir.path(), &known).unwrap();
+        assert!(second.upserts.is_empty());
+        assert_eq!(second.items[0].rating, 3);
+    }
+
+    #[test]
+    fn ratingless_sidecar_does_not_override_pair_partner() {
+        let dir = tempfile::tempdir().unwrap();
+        let raw = touch(dir.path(), "b.CR3", b"x");
+        let jpg = touch(dir.path(), "b.JPG", b"x");
+        let first = scan_folder(dir.path(), &HashMap::new()).unwrap();
+        xmp::write_rating(&raw, 4, false).unwrap();
+        let raw_synced = xmp::sidecar_mtime_ns(&raw).unwrap();
+        let mut known = known_from(&first);
+        {
+            let r = known.get_mut(&raw).unwrap();
+            r.rating = 4;
+            r.xmp_synced_at = Some(raw_synced);
+        }
+        // A geotagger later writes a sidecar for the JPEG without any rating.
+        let jpg_sidecar = xmp::sidecar_path(&jpg);
+        fs::write(&jpg_sidecar, xmp::EMPTY_PACKET).unwrap();
+        let later = std::time::UNIX_EPOCH
+            + std::time::Duration::from_nanos(raw_synced as u64)
+            + std::time::Duration::from_secs(60);
+        fs::File::options()
+            .write(true)
+            .open(&jpg_sidecar)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        let second = scan_folder(dir.path(), &known).unwrap();
+        assert_eq!(second.items[0].rating, 4);
+        assert!(
+            second.upserts.iter().all(|r| r.path != raw),
+            "the RAW's real rating must not be rewritten"
+        );
     }
 
     #[test]
