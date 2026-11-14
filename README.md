@@ -60,6 +60,7 @@ overrode it) to remove both files again.
 | `M` / `C` | Move / copy to folder… |
 | `Ctrl+Shift+M` | Move to the last destination |
 | `Ctrl+F` | Focus the filter bar |
+| `Ctrl+A` | Select all visible photos (grid) |
 | `Enter`, double-click | Open full view |
 | `←` `→` `Space` `Backspace` | Previous / next (full view) |
 | `Z`, double-click | Fit ↔ 100 % (RAW: full decode) |

@@ -42,6 +42,7 @@ fn handle_common(
     match (ctrl, ch) {
         (true, Some('o')) => state.choose_folder(),
         (true, Some('f')) => state.focus_filters(),
+        (true, Some('a')) if !shift && !state.viewer_active() => state.select_all(),
         (true, Some('m')) if shift => state.move_to_last(),
         (false, Some(c @ '0'..='5')) => state.rate(RatingChange::Set(c as u8 - b'0')),
         (false, Some('x')) => state.rate(RatingChange::ToggleReject),

@@ -970,6 +970,13 @@ impl AppState {
         }
     }
 
+    /// Selects every photo the grid shows (hidden ones, e.g. filtered-out rejects, stay
+    /// unselected so a following move or organize never touches what you can't see).
+    /// Handled at window level: GTK's own Ctrl+A only works while the grid has focus.
+    pub fn select_all(&self) {
+        self.selection.select_all();
+    }
+
     pub fn focus_filters(&self) {
         if let Some(first) = self.widgets().filters.first_child() {
             first.grab_focus();
