@@ -18,6 +18,9 @@ pub enum IndexError {
     Io(#[from] std::io::Error),
     #[error("index schema version mismatch")]
     SchemaMismatch,
+    /// Written by a newer build: left untouched so that build keeps its data.
+    #[error("index was created by a newer version of Photobrowser")]
+    SchemaTooNew,
 }
 
 pub type Result<T> = std::result::Result<T, IndexError>;
@@ -110,8 +113,9 @@ fn row_to_record(r: &rusqlite::Row) -> rusqlite::Result<FileRecord> {
     })
 }
 
-/// Classify whether an error indicates actual corruption (not transient failures).
-/// Only NotADatabase, DatabaseCorrupt, and schema mismatch are considered corruption.
+/// Classify whether an error means the file must be set aside and rebuilt (not transient
+/// failures). Only NotADatabase, DatabaseCorrupt, and an older or unreadable schema version
+/// qualify; a newer schema is left alone.
 fn is_corruption(e: &IndexError) -> bool {
     use rusqlite::ErrorCode;
     match e {
@@ -126,6 +130,48 @@ fn is_corruption(e: &IndexError) -> bool {
     }
 }
 
+/// Ok for this build's version; `SchemaTooNew` for a newer one; `SchemaMismatch` for an
+/// older or unreadable one.
+fn check_version(stored: &str) -> Result<()> {
+    let ours: u32 = SCHEMA_VERSION.parse().expect("SCHEMA_VERSION is a number");
+    match stored.trim().parse::<u32>() {
+        Ok(v) if v == ours => Ok(()),
+        Ok(v) if v > ours => Err(IndexError::SchemaTooNew),
+        _ => Err(IndexError::SchemaMismatch),
+    }
+}
+
+/// Renames the database and its `-wal`/`-shm` files to `<path>.bak-<timestamp>[-N]`, keeping
+/// the suffixes so the backup still opens with its uncheckpointed changes.
+fn back_up(path: &Path) -> Result<PathBuf> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let with_suffix = |base: &Path, suffix: &str| {
+        let mut p = base.as_os_str().to_owned();
+        p.push(suffix);
+        PathBuf::from(p)
+    };
+    let mut backup = with_suffix(path, &format!(".bak-{stamp}"));
+    let mut n = 1;
+    while ["", "-wal", "-shm"]
+        .iter()
+        .any(|s| with_suffix(&backup, s).exists())
+    {
+        backup = with_suffix(path, &format!(".bak-{stamp}-{n}"));
+        n += 1;
+    }
+    for suffix in ["", "-wal", "-shm"] {
+        match std::fs::rename(with_suffix(path, suffix), with_suffix(&backup, suffix)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(backup)
+}
+
 pub struct Index {
     conn: Connection,
 }
@@ -138,7 +184,9 @@ impl Index {
             .join("index.db")
     }
 
-    /// Opens (or creates) the index; a corrupt or outdated file is deleted and rebuilt.
+    /// Opens (or creates) the index. A corrupt file or an older schema is set aside as
+    /// `<path>.bak-<timestamp>` (never deleted: it may hold ratings no sidecar has) and a
+    /// fresh index is created. A newer schema returns `SchemaTooNew` and is left untouched.
     /// Transient errors (locked, permission denied, I/O) are returned unchanged.
     pub fn open(path: &Path) -> Result<Index> {
         if let Some(dir) = path.parent() {
@@ -146,20 +194,12 @@ impl Index {
         }
         match Self::try_open(path) {
             Ok(index) => Ok(index),
-            Err(e) => {
-                if is_corruption(&e) {
-                    // Delete corrupted database and all WAL/SHM files
-                    for suffix in ["", "-wal", "-shm"] {
-                        let mut p = path.as_os_str().to_owned();
-                        p.push(suffix);
-                        let _ = std::fs::remove_file(p);
-                    }
-                    Self::try_open(path)
-                } else {
-                    // Transient error: return it unchanged
-                    Err(e)
-                }
+            Err(e) if is_corruption(&e) => {
+                let backup = back_up(path)?;
+                eprintln!("index set aside as {} ({e})", backup.display());
+                Self::try_open(path)
             }
+            Err(e) => Err(e),
         }
     }
 
@@ -174,24 +214,33 @@ impl Index {
     }
 
     fn init(conn: Connection) -> Result<Index> {
-        conn.execute_batch(SCHEMA)?;
-        let version: Option<String> = conn
-            .query_row(
+        // Check the version before touching the schema, so a newer file stays as it was.
+        let has_meta: bool = conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta')",
+            [],
+            |r| r.get(0),
+        )?;
+        let version: Option<String> = if has_meta {
+            conn.query_row(
                 "SELECT value FROM meta WHERE key = 'schema_version'",
                 [],
                 |r| r.get(0),
             )
-            .optional()?;
-        match version.as_deref() {
-            None => {
-                conn.execute(
-                    "INSERT INTO meta (key, value) VALUES ('schema_version', ?1)",
-                    [SCHEMA_VERSION],
-                )?;
-            }
-            Some(v) if v == SCHEMA_VERSION => {}
-            Some(_) => return Err(IndexError::SchemaMismatch),
+            .optional()?
+        } else {
+            None
+        };
+        if let Some(v) = &version {
+            check_version(v)?;
         }
+        conn.execute_batch(SCHEMA)?;
+        if version.is_none() {
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES ('schema_version', ?1)",
+                [SCHEMA_VERSION],
+            )?;
+        }
+        // Future migrations from an older version go here, instead of a rebuild.
         Ok(Index { conn })
     }
 
@@ -447,7 +496,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_mismatch_is_rebuilt() {
+    fn older_schema_is_backed_up_and_rebuilt() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("index.db");
         {
@@ -459,6 +508,101 @@ mod tests {
         }
         let idx = Index::open(&path).unwrap();
         assert!(idx.load_folder(Path::new("/p")).unwrap().is_empty());
+        let backup = only_backup(dir.path());
+        let conn = Connection::open(&backup).unwrap();
+        let rows: i64 = conn
+            .query_row("SELECT count(*) FROM files", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 1, "the backup keeps the old rows");
+    }
+
+    /// The single `index.db.bak-*` main file in `dir`.
+    fn only_backup(dir: &Path) -> PathBuf {
+        let backups: Vec<PathBuf> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| {
+                let name = p.file_name().unwrap().to_string_lossy().into_owned();
+                name.starts_with("index.db.bak-")
+                    && !name.ends_with("-wal")
+                    && !name.ends_with("-shm")
+            })
+            .collect();
+        assert_eq!(backups.len(), 1, "{backups:?}");
+        backups.into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn newer_schema_is_left_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        {
+            let mut idx = Index::open(&path).unwrap();
+            idx.upsert_many(&[rec("/p/a.jpg")]).unwrap();
+            idx.conn
+                .execute("UPDATE meta SET value='99' WHERE key='schema_version'", [])
+                .unwrap();
+        }
+        assert!(matches!(Index::open(&path), Err(IndexError::SchemaTooNew)));
+        let conn = Connection::open(&path).unwrap();
+        let (rows, version): (i64, String) = conn
+            .query_row(
+                "SELECT (SELECT count(*) FROM files), \
+                 (SELECT value FROM meta WHERE key = 'schema_version')",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((rows, version.as_str()), (1, "99"));
+        assert!(
+            std::fs::read_dir(dir.path()).unwrap().all(|e| !e
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(".bak-")),
+            "no backup for a newer schema"
+        );
+    }
+
+    #[test]
+    fn corrupt_file_is_backed_up_and_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        std::fs::write(&path, b"this is not a database, just some bytes.....").unwrap();
+        let mut idx = Index::open(&path).unwrap();
+        idx.upsert_many(&[rec("/p/a.jpg")]).unwrap();
+        assert_eq!(
+            std::fs::read(only_backup(dir.path())).unwrap(),
+            b"this is not a database, just some bytes....."
+        );
+    }
+
+    #[test]
+    fn backups_do_not_overwrite_each_other() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.db");
+        std::fs::write(&path, b"first").unwrap();
+        let a = back_up(&path).unwrap();
+        std::fs::write(&path, b"second").unwrap();
+        let b = back_up(&path).unwrap();
+        assert_ne!(a, b);
+        assert_eq!(std::fs::read(&a).unwrap(), b"first");
+        assert_eq!(std::fs::read(&b).unwrap(), b"second");
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn version_check() {
+        assert!(check_version(SCHEMA_VERSION).is_ok());
+        assert!(matches!(
+            check_version("0"),
+            Err(IndexError::SchemaMismatch)
+        ));
+        assert!(matches!(
+            check_version("x"),
+            Err(IndexError::SchemaMismatch)
+        ));
+        assert!(matches!(check_version("99"), Err(IndexError::SchemaTooNew)));
     }
 
     #[test]
@@ -475,8 +619,9 @@ mod tests {
     fn is_corruption_classifier() {
         use rusqlite::ErrorCode;
 
-        // SchemaMismatch is corruption
+        // An older schema is set aside and rebuilt; a newer one is not
         assert!(is_corruption(&IndexError::SchemaMismatch));
+        assert!(!is_corruption(&IndexError::SchemaTooNew));
 
         // Io error is NOT corruption (transient)
         let io_err = IndexError::Io(std::io::Error::new(
