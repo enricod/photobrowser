@@ -14,6 +14,8 @@ use std::ffi::{CStr, CString, OsStr, c_char, c_double, c_int, c_long, c_uint, c_
 use std::os::unix::ffi::OsStrExt;
 use std::ptr;
 
+use crate::exif;
+
 mod sys {
     use super::*;
 
@@ -279,8 +281,8 @@ impl Metadata {
         Ok(Metadata { raw })
     }
 
-    /// Use `crate::exif::open_path` instead: it holds the exiv2 lock.
-    pub(crate) fn new_from_path(path: &OsStr) -> Result<Metadata> {
+    /// Use `crate::exif::open_path`: only it can provide the lock guard.
+    pub(crate) fn new_from_path(path: &OsStr, _lock: &exif::Shared<'_>) -> Result<Metadata> {
         let c_path = cstring(path.as_bytes())?;
         let meta = Metadata::new()?;
         let mut ok = 0;
@@ -291,8 +293,8 @@ impl Metadata {
         Ok(meta)
     }
 
-    /// Use `crate::exif::open_buffer` instead: it holds the exiv2 lock.
-    pub(crate) fn new_from_buffer(data: &[u8]) -> Result<Metadata> {
+    /// Use `crate::exif::open_buffer`: only it can provide the lock guard.
+    pub(crate) fn new_from_buffer(data: &[u8], _lock: &exif::Shared<'_>) -> Result<Metadata> {
         let len =
             c_long::try_from(data.len()).map_err(|_| Error::Gexiv2("buffer too large".into()))?;
         let meta = Metadata::new()?;
@@ -304,8 +306,8 @@ impl Metadata {
         Ok(meta)
     }
 
-    /// Use `crate::exif::save` instead: it holds the exiv2 lock.
-    pub(crate) fn save_to_file(&self, path: &OsStr) -> Result<()> {
+    /// Use `crate::exif::save`: only it can provide the lock guard.
+    pub(crate) fn save_to_file(&self, path: &OsStr, _lock: &exif::Exclusive<'_>) -> Result<()> {
         let c_path = cstring(path.as_bytes())?;
         let mut ok = 0;
         let err = with_error(|e| {
@@ -377,9 +379,12 @@ impl Metadata {
             .filter(|v| *v >= 0.0)
     }
 
-    /// Embedded previews. Use `crate::exif::largest_jpeg_preview` instead: it holds the
-    /// exiv2 lock.
-    pub(crate) fn get_preview_images(&self) -> Vec<Preview<'_>> {
+    /// Embedded previews. Use `crate::exif::largest_jpeg_preview`: only it can provide the
+    /// lock guard. The previews borrow the guard, so `Preview::data` can only run under it.
+    pub(crate) fn get_preview_images<'a>(
+        &'a self,
+        _lock: &'a exif::Shared<'_>,
+    ) -> Vec<Preview<'a>> {
         let list = unsafe { sys::gexiv2_metadata_get_preview_properties(self.raw) };
         let mut out = Vec::new();
         if list.is_null() {
@@ -399,7 +404,7 @@ impl Metadata {
     }
 }
 
-/// One embedded preview; borrows the metadata that owns it.
+/// One embedded preview; borrows the metadata that owns it and the exiv2 lock guard.
 pub struct Preview<'a> {
     meta: &'a Metadata,
     props: *mut sys::GExiv2PreviewProperties,

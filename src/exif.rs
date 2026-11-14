@@ -1,5 +1,5 @@
 use std::path::Path;
-use std::sync::{Once, PoisonError, RwLock};
+use std::sync::{Once, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::gexiv2::{self, Metadata};
 
@@ -18,6 +18,29 @@ static INIT: Once = Once::new();
 /// registration anyway, not the decode.
 static EXIV2_LOCK: RwLock<()> = RwLock::new(());
 
+/// Proof that the shared side of `EXIV2_LOCK` is held. The private field means only this
+/// module can create one, so gexiv2 calls that require it cannot run without the lock.
+pub struct Shared<'a> {
+    _guard: RwLockReadGuard<'a, ()>,
+}
+
+/// Proof that the exclusive side of `EXIV2_LOCK` is held. See `Shared`.
+pub struct Exclusive<'a> {
+    _guard: RwLockWriteGuard<'a, ()>,
+}
+
+fn lock_shared() -> Shared<'static> {
+    Shared {
+        _guard: EXIV2_LOCK.read().unwrap_or_else(PoisonError::into_inner),
+    }
+}
+
+fn lock_exclusive() -> Exclusive<'static> {
+    Exclusive {
+        _guard: EXIV2_LOCK.write().unwrap_or_else(PoisonError::into_inner),
+    }
+}
+
 /// Initialises exiv2 once per process. Call before any gexiv2 use.
 pub fn init() {
     INIT.call_once(|| {
@@ -27,34 +50,31 @@ pub fn init() {
     });
 }
 
-/// Opens a file's metadata. Always use this (not `Metadata::new_from_path`).
+/// Opens a file's metadata.
 pub fn open_path(path: &Path) -> gexiv2::Result<Metadata> {
     init();
-    let _shared = EXIV2_LOCK.read().unwrap_or_else(PoisonError::into_inner);
-    Metadata::new_from_path(path.as_os_str())
+    Metadata::new_from_path(path.as_os_str(), &lock_shared())
 }
 
-/// Parses metadata from an in-memory image. Always use this (not `Metadata::new_from_buffer`).
+/// Parses metadata from an in-memory image.
 pub fn open_buffer(data: &[u8]) -> gexiv2::Result<Metadata> {
     init();
-    let _shared = EXIV2_LOCK.read().unwrap_or_else(PoisonError::into_inner);
-    Metadata::new_from_buffer(data)
+    Metadata::new_from_buffer(data, &lock_shared())
 }
 
-/// Writes metadata back to `path`. Always use this (not `Metadata::save_to_file`).
+/// Writes metadata back to `path`.
 pub fn save(meta: &Metadata, path: &Path) -> gexiv2::Result<()> {
     init();
-    let _exclusive = EXIV2_LOCK.write().unwrap_or_else(PoisonError::into_inner);
-    meta.save_to_file(path.as_os_str())
+    meta.save_to_file(path.as_os_str(), &lock_exclusive())
 }
 
 /// Data of the largest embedded JPEG preview whose long edge is at least `needed` px.
-/// Always use this (not `Metadata::get_preview_images`): preview enumeration reads
-/// through exiv2, so it holds the shared side of the lock like `open_path`.
+/// Preview enumeration and extraction read through exiv2, so they hold the shared side of
+/// the lock like `open_path`.
 pub fn largest_jpeg_preview(meta: &Metadata, needed: u32) -> Option<Vec<u8>> {
     init();
-    let _shared = EXIV2_LOCK.read().unwrap_or_else(PoisonError::into_inner);
-    let previews = meta.get_preview_images();
+    let shared = lock_shared();
+    let previews = meta.get_preview_images(&shared);
     let best = previews
         .iter()
         .filter(|p| {
@@ -223,46 +243,26 @@ mod tests {
         assert_eq!(info.summary(), "Canon EOS R6 · 1/250 s · f/4 · ISO 400");
     }
 
-    /// Every exiv2 entry point that parses, encodes or reads previews must go through the
-    /// wrappers in this file (they hold `EXIV2_LOCK`).
+    /// The guard parameters make the compiler reject any locked call made without
+    /// `EXIV2_LOCK`. The one way around them is calling the C function directly, so each
+    /// locked entry point must be called exactly once in `gexiv2.rs`: inside its guarded
+    /// method (`Preview::data` is guarded through the borrow `get_preview_images` returns).
     #[test]
-    fn exiv2_access_only_through_wrappers() {
-        const FORBIDDEN: [&str; 4] = [
-            "new_from_path",
-            "new_from_buffer",
-            "save_to_file",
-            "get_preview_images",
+    fn locked_ffi_calls_only_in_guarded_methods() {
+        const LOCKED: [&str; 5] = [
+            "gexiv2_metadata_open_path",
+            "gexiv2_metadata_open_buf",
+            "gexiv2_metadata_save_file",
+            "gexiv2_metadata_get_preview_properties",
+            "gexiv2_metadata_try_get_preview_image",
         ];
-        fn walk(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
-            for entry in std::fs::read_dir(dir).unwrap() {
-                let path = entry.unwrap().path();
-                if path.is_dir() {
-                    walk(&path, out);
-                } else if path.extension().is_some_and(|e| e == "rs") {
-                    out.push(path);
-                }
-            }
+        let text = include_str!("gexiv2.rs");
+        for name in LOCKED {
+            let calls = text.matches(&format!("sys::{name}(")).count();
+            assert_eq!(
+                calls, 1,
+                "{name} must be called exactly once, in its guarded method"
+            );
         }
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let mut files = Vec::new();
-        for dir in ["src", "tests", "benches"] {
-            if root.join(dir).is_dir() {
-                walk(&root.join(dir), &mut files);
-            }
-        }
-        let allowed = [root.join("src/exif.rs"), root.join("src/gexiv2.rs")];
-        let offenders: Vec<String> = files
-            .iter()
-            .filter(|f| !allowed.contains(f))
-            .flat_map(|f| {
-                let text = std::fs::read_to_string(f).unwrap();
-                FORBIDDEN
-                    .iter()
-                    .filter(|pat| text.contains(**pat))
-                    .map(|pat| format!("{}: {pat}", f.display()))
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-        assert!(offenders.is_empty(), "direct exiv2 access: {offenders:?}");
     }
 }
