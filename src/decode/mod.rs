@@ -1,4 +1,5 @@
 pub mod generic;
+pub mod helper;
 pub mod jpeg;
 pub mod pixels;
 pub mod raw;

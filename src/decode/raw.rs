@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use super::{DecodeError, Rgba, jpeg};
+use super::{DecodeError, Rgba, helper, jpeg};
 use crate::exif;
 use crate::libraw::{Raw, flip_to_orientation};
 
@@ -25,7 +25,61 @@ pub fn decode_raw_preview(path: &Path, target_edge: u32) -> Result<(Rgba, u8), D
     {
         return Ok((img, exif::orientation(&meta)));
     }
+    isolated(
+        || helper::preview_args(path, target_edge),
+        helper::PREVIEW_TIMEOUT,
+        || libraw_preview(path, target_edge),
+    )
+}
 
+/// Full-resolution demosaic (slow: 0.5–2 s). Upright.
+pub fn decode_raw_full(path: &Path) -> Result<Rgba, DecodeError> {
+    isolated(
+        || helper::full_args(path),
+        helper::FULL_TIMEOUT,
+        || libraw_full(path),
+    )
+    .map(|(img, _)| img)
+}
+
+/// Runs a LibRaw decode in a helper process (see `helper`), so a crash inside LibRaw cannot
+/// take the app down. Unit tests run it in-process: the test binary cannot act as the helper.
+/// If the helper cannot be started at all (e.g. the binary was replaced on disk), it falls
+/// back to decoding in-process rather than failing every RAW.
+#[cfg(not(test))]
+fn isolated(
+    args: impl FnOnce() -> Vec<std::ffi::OsString>,
+    timeout: std::time::Duration,
+    in_process: impl FnOnce() -> Result<(Rgba, u8), DecodeError>,
+) -> Result<(Rgba, u8), DecodeError> {
+    match helper::current_program() {
+        Ok(program) => match helper::run_helper(&program, &args(), timeout) {
+            Err(DecodeError::Io(e)) => {
+                eprintln!("RAW decoder helper unavailable ({e}); decoding in-process");
+                in_process()
+            }
+            other => other,
+        },
+        Err(e) => {
+            eprintln!("RAW decoder helper unavailable ({e}); decoding in-process");
+            in_process()
+        }
+    }
+}
+
+#[cfg(test)]
+fn isolated(
+    _args: impl FnOnce() -> Vec<std::ffi::OsString>,
+    _timeout: std::time::Duration,
+    in_process: impl FnOnce() -> Result<(Rgba, u8), DecodeError>,
+) -> Result<(Rgba, u8), DecodeError> {
+    in_process()
+}
+
+/// The LibRaw part of `decode_raw_preview`: the embedded thumbnail if big enough, else a
+/// half-size demosaic. Runs inside the helper process.
+pub fn libraw_preview(path: &Path, target_edge: u32) -> Result<(Rgba, u8), DecodeError> {
+    let needed = needed_edge(target_edge);
     let mut raw = Raw::open(path)?;
     let orientation = flip_to_orientation(raw.flip());
     if let Ok(Some(data)) = raw.thumbnail_jpeg() {
@@ -37,9 +91,9 @@ pub fn decode_raw_preview(path: &Path, target_edge: u32) -> Result<(Rgba, u8), D
     Ok((raw.decode(true)?, 1))
 }
 
-/// Full-resolution demosaic (slow: 0.5–2 s). Upright.
-pub fn decode_raw_full(path: &Path) -> Result<Rgba, DecodeError> {
-    Ok(Raw::open(path)?.decode(false)?)
+/// Full-resolution LibRaw demosaic, already upright. Runs inside the helper process.
+pub fn libraw_full(path: &Path) -> Result<(Rgba, u8), DecodeError> {
+    Ok((Raw::open(path)?.decode(false)?, 1))
 }
 
 #[cfg(test)]
