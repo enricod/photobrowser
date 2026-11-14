@@ -13,6 +13,7 @@ use gtk::{gdk, gio, glib};
 use lru::LruCache;
 
 use super::item_object::ItemObject;
+use super::pathbar::{PathBar, display_dir};
 use super::viewer::{Viewer, info_text};
 use crate::catalog::diff::diff_items;
 use crate::catalog::rating::{self, RatingChange};
@@ -87,6 +88,7 @@ pub struct Widgets {
     pub counter: gtk::Label,
     pub filters: gtk::Box,
     pub viewer: Rc<Viewer>,
+    pub path_bar: PathBar,
 }
 
 pub struct AppState {
@@ -470,6 +472,7 @@ impl AppState {
         self.widgets()
             .window
             .set_title(Some(&format!("{name} — Photobrowser")));
+        self.widgets().path_bar.set_folder(Some(&folder));
 
         let known = self.index.borrow().load_folder(&folder).unwrap_or_default();
         let mut items = sync::items_from_records(&known);
@@ -524,6 +527,7 @@ impl AppState {
         self.reset();
         self.widgets().stack.set_visible_child_name("empty");
         self.widgets().window.set_title(Some("Photobrowser"));
+        self.widgets().path_bar.set_folder(None);
         self.toast(message);
     }
 
@@ -1803,24 +1807,6 @@ fn files_changed(old: &[MediaFile], new: &[MediaFile]) -> bool {
     old != new
 }
 
-/// A folder path for messages, with the home folder shortened to `~` (e.g. "~/Docs").
-fn display_dir(path: &std::path::Path) -> String {
-    display_dir_with_home(path, &glib::home_dir())
-}
-
-fn display_dir_with_home(path: &std::path::Path, home: &std::path::Path) -> String {
-    // A root or empty home would turn every path into "~/…".
-    if home.parent().is_none() {
-        return path.display().to_string();
-    }
-    // `strip_prefix` compares whole components, so "/home/enrico2" is not under "/home/enrico".
-    match path.strip_prefix(home) {
-        Ok(rest) if rest.as_os_str().is_empty() => "~".to_owned(),
-        Ok(rest) => format!("~/{}", rest.display()),
-        Err(_) => path.display().to_string(),
-    }
-}
-
 #[derive(Debug, PartialEq, Eq)]
 enum ViewerFallback {
     Keep,
@@ -1905,22 +1891,6 @@ mod tests {
         assert!(failed);
         assert!(row(&index, "/p/a.jpg").xmp_dirty);
         assert!(inflight.is_empty());
-    }
-
-    #[test]
-    fn display_dir_shortens_home() {
-        let home = std::path::Path::new("/home/enrico");
-        let show = |p: &str| display_dir_with_home(std::path::Path::new(p), home);
-        assert_eq!(show("/home/enrico/Docs"), "~/Docs");
-        assert_eq!(show("/home/enrico/Pictures/2026"), "~/Pictures/2026");
-        assert_eq!(show("/home/enrico"), "~");
-        assert_eq!(show("/run/media/enrico/USB"), "/run/media/enrico/USB");
-        assert_eq!(show("/home/enrico2/x"), "/home/enrico2/x");
-        let root = std::path::Path::new("/");
-        assert_eq!(
-            display_dir_with_home(std::path::Path::new("/srv/x"), root),
-            "/srv/x"
-        );
     }
 
     fn mf(path: &str, size: u64, mtime_ns: i64) -> MediaFile {
