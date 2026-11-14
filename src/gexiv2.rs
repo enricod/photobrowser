@@ -314,10 +314,10 @@ impl Metadata {
         check(ok, err)
     }
 
-    pub fn has_tag(&self, tag: &str) -> bool {
-        let Ok(tag) = cstring(tag) else { return false };
+    pub fn has_tag(&self, tag: &str) -> Result<bool> {
+        let tag = cstring(tag)?;
         with_error(|e| unsafe { sys::gexiv2_metadata_try_has_tag(self.raw, tag.as_ptr(), e) })
-            .is_ok_and(|v| v != 0)
+            .map(|v| v != 0)
     }
 
     pub fn get_tag_string(&self, tag: &str) -> Result<String> {

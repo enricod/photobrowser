@@ -72,6 +72,10 @@ pub fn scan_folder(folder: &Path, known: &HashMap<PathBuf, FileRecord>) -> io::R
 
 /// Imports the sidecar's rating when it changed since the last sync.
 /// Returns true if `rec` was modified.
+///
+/// A sidecar that cannot be read leaves `rec` untouched, including `xmp_synced_at`: it is
+/// retried on the next scan, and its stale rating cannot win `reconcile_item` and be pushed
+/// onto the other file of a pair.
 fn import_sidecar(rec: &mut FileRecord) -> bool {
     if rec.xmp_dirty {
         return false; // a local change is waiting to be written: local wins
@@ -82,15 +86,22 @@ fn import_sidecar(rec: &mut FileRecord) -> bool {
     if rec.xmp_synced_at.is_some_and(|t| t >= mtime) {
         return false;
     }
-    rec.xmp_synced_at = Some(mtime);
     match xmp::read_rating(&rec.path) {
         Ok(Some(XmpRating::Stars(n))) => {
             rec.rating = n;
             rec.rejected = false;
         }
         Ok(Some(XmpRating::Rejected)) => rec.rejected = true,
-        Ok(None) | Err(_) => {}
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!(
+                "couldn't read sidecar {}: {e}",
+                xmp::sidecar_path(&rec.path).display()
+            );
+            return false;
+        }
     }
+    rec.xmp_synced_at = Some(mtime);
     true
 }
 
@@ -257,6 +268,52 @@ mod tests {
         assert_eq!(
             (second.items[0].rating, second.items[0].rejected),
             (3, true)
+        );
+    }
+
+    #[test]
+    fn unreadable_sidecar_is_not_marked_synced() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = touch(dir.path(), "a.jpg", b"x");
+        let first = scan_folder(dir.path(), &HashMap::new()).unwrap();
+        let mut known = known_from(&first);
+        {
+            let rec = known.get_mut(&a).unwrap();
+            rec.rating = 3;
+            rec.xmp_synced_at = None;
+        }
+        fs::write(xmp::sidecar_path(&a), b"definitely not xmp").unwrap();
+        let second = scan_folder(dir.path(), &known).unwrap();
+        assert!(second.upserts.is_empty(), "record must not change");
+        assert_eq!(second.items[0].rating, 3);
+    }
+
+    #[test]
+    fn unreadable_sidecar_does_not_override_pair_partner() {
+        let dir = tempfile::tempdir().unwrap();
+        let raw = touch(dir.path(), "b.CR3", b"x");
+        let jpg = touch(dir.path(), "b.JPG", b"x");
+        let first = scan_folder(dir.path(), &HashMap::new()).unwrap();
+        xmp::write_rating(&jpg, 4, false).unwrap();
+        let mut known = known_from(&first);
+        let jpg_synced = xmp::sidecar_mtime_ns(&jpg);
+        {
+            let j = known.get_mut(&jpg).unwrap();
+            j.rating = 4;
+            j.xmp_synced_at = jpg_synced;
+        }
+        {
+            // Stale catalog rating; its sidecar is newer than the JPEG's but unreadable.
+            let r = known.get_mut(&raw).unwrap();
+            r.rating = 1;
+            r.xmp_synced_at = None;
+        }
+        fs::write(xmp::sidecar_path(&raw), b"definitely not xmp").unwrap();
+        let second = scan_folder(dir.path(), &known).unwrap();
+        assert_eq!(second.items[0].rating, 4);
+        assert!(
+            second.upserts.iter().all(|r| r.path != jpg),
+            "the readable sidecar's record must not be rewritten"
         );
     }
 

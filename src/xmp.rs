@@ -66,7 +66,7 @@ pub fn read_rating(file: &Path) -> Result<Option<XmpRating>, XmpError> {
         return Ok(None);
     }
     let meta = exif::open_path(&sidecar)?;
-    if !meta.has_tag(RATING_TAG) {
+    if !meta.has_tag(RATING_TAG)? {
         return Ok(None);
     }
     let raw = meta.get_tag_string(RATING_TAG)?;
@@ -216,6 +216,17 @@ mod tests {
         assert!(read_rating(&file).is_err() || read_rating(&file).unwrap().is_none());
         write_rating(&file, 2, false).unwrap();
         assert_eq!(read_rating(&file).unwrap(), Some(XmpRating::Stars(2)));
+    }
+
+    #[test]
+    fn has_tag_reports_exiv2_errors() {
+        use crate::gexiv2::Error;
+        let meta = exif::open_path(Path::new(FIXTURE)).unwrap();
+        assert_eq!(meta.has_tag(RATING_TAG), Ok(true));
+        // An unknown XMP namespace is just "absent"; an invalid key family is an exiv2 error.
+        assert_eq!(meta.has_tag("Xmp.photobrowserNoSuchNs.Rating"), Ok(false));
+        assert!(matches!(meta.has_tag("Bogus.x.y"), Err(Error::Gexiv2(_))));
+        assert_eq!(meta.has_tag("Xmp.xmp.Ra\0ting"), Err(Error::Nul));
     }
 
     #[test]
