@@ -1472,9 +1472,10 @@ impl AppState {
             OpKind::Copy => "Copying",
         };
         self.toast(&format!(
-            "{verb} {} item{}…",
+            "{verb} {} item{} to {}…",
             jobs.len(),
-            if jobs.len() == 1 { "" } else { "s" }
+            if jobs.len() == 1 { "" } else { "s" },
+            display_dir(&dest)
         ));
         let tx = self.tx.clone();
         std::thread::Builder::new()
@@ -1608,13 +1609,10 @@ impl AppState {
             OpKind::Move => "Moved",
             OpKind::Copy => "Copied",
         };
-        let name = dest
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
         let mut text = format!(
-            "{verb} {done} item{} to “{name}”",
-            if done == 1 { "" } else { "s" }
+            "{verb} {done} item{} to {}",
+            if done == 1 { "" } else { "s" },
+            display_dir(dest)
         );
         if skipped > 0 {
             text.push_str(&format!(", {skipped} skipped"));
@@ -1673,6 +1671,24 @@ impl AppState {
     }
 }
 
+/// A folder path for messages, with the home folder shortened to `~` (e.g. "~/Docs").
+fn display_dir(path: &std::path::Path) -> String {
+    display_dir_with_home(path, &glib::home_dir())
+}
+
+fn display_dir_with_home(path: &std::path::Path, home: &std::path::Path) -> String {
+    // A root or empty home would turn every path into "~/…".
+    if home.parent().is_none() {
+        return path.display().to_string();
+    }
+    // `strip_prefix` compares whole components, so "/home/enrico2" is not under "/home/enrico".
+    match path.strip_prefix(home) {
+        Ok(rest) if rest.as_os_str().is_empty() => "~".to_owned(),
+        Ok(rest) => format!("~/{}", rest.display()),
+        Err(_) => path.display().to_string(),
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum ViewerFallback {
     Keep,
@@ -1698,6 +1714,22 @@ mod tests {
 
     fn jobs(paths: Vec<&str>) -> Vec<(ItemId, Vec<PathBuf>)> {
         vec![(1, paths.into_iter().map(PathBuf::from).collect())]
+    }
+
+    #[test]
+    fn display_dir_shortens_home() {
+        let home = std::path::Path::new("/home/enrico");
+        let show = |p: &str| display_dir_with_home(std::path::Path::new(p), home);
+        assert_eq!(show("/home/enrico/Docs"), "~/Docs");
+        assert_eq!(show("/home/enrico/Pictures/2026"), "~/Pictures/2026");
+        assert_eq!(show("/home/enrico"), "~");
+        assert_eq!(show("/run/media/enrico/USB"), "/run/media/enrico/USB");
+        assert_eq!(show("/home/enrico2/x"), "/home/enrico2/x");
+        let root = std::path::Path::new("/");
+        assert_eq!(
+            display_dir_with_home(std::path::Path::new("/srv/x"), root),
+            "/srv/x"
+        );
     }
 
     #[test]
