@@ -156,17 +156,40 @@ fn transfer_one(src: &Path, dst: &Path, kind: OpKind) -> io::Result<()> {
     }
 }
 
-/// Copies via a hidden temp file, fsyncs, checks the size, keeps the mtime, then renames.
+/// Flushes `dir`'s entries (e.g. a rename into it) to disk. Filesystems that cannot sync a
+/// directory (some network and FUSE mounts) report InvalidInput or Unsupported: there is
+/// nothing more to do there, so those count as success.
+fn sync_dir(dir: &Path) -> io::Result<()> {
+    match File::open(dir).and_then(|d| d.sync_all()) {
+        Err(e)
+            if matches!(
+                e.kind(),
+                io::ErrorKind::InvalidInput | io::ErrorKind::Unsupported
+            ) =>
+        {
+            Ok(())
+        }
+        other => other,
+    }
+}
+
+/// Copies via a hidden temp file, fsyncs, checks the size, keeps the mtime, renames, then
+/// syncs the destination folder, so a move's source is only removed once the new name is on
+/// disk. On failure only a temp file this call created is removed: an existing `.pbpart`
+/// (left by an earlier crash) may hold the last copy of a photo.
 fn copy_verified(src: &Path, dst: &Path) -> io::Result<()> {
     let mut tmp_name = OsString::from(".");
     tmp_name.push(dst.file_name().unwrap_or_default());
     tmp_name.push(".pbpart");
     let tmp = dst.with_file_name(tmp_name);
 
+    let mut created = false;
+    let mut renamed = false;
     let result = (|| {
         let mut input = File::open(src)?;
         let src_meta = input.metadata()?;
         let mut out = File::create_new(&tmp)?;
+        created = true;
         let copied = io::copy(&mut input, &mut out)?;
         out.set_modified(src_meta.modified()?)?;
         out.sync_all()?;
@@ -179,10 +202,13 @@ fn copy_verified(src: &Path, dst: &Path) -> io::Result<()> {
                 "destination exists",
             ));
         }
-        fs::rename(&tmp, dst)
+        fs::rename(&tmp, dst)?;
+        renamed = true;
+        sync_dir(dst.parent().unwrap_or(Path::new(".")))
     })();
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp);
+    if result.is_err() && created {
+        // After the rename the copy lives at `dst`; the caller keeps the source.
+        let _ = fs::remove_file(if renamed { dst } else { &tmp });
     }
     result
 }
@@ -372,6 +398,34 @@ mod tests {
         write(&f.dst.join("IMG_1_1.CR3.xmp"), "leftover");
         let plan = plan_targets(&[raw], &f.dst, ConflictPolicy::Rename).unwrap();
         assert_eq!(plan, [(f.src.join("IMG_1.CR3"), f.dst.join("IMG_1_2.CR3"))]);
+    }
+
+    #[test]
+    fn copy_leaves_an_existing_part_file_alone() {
+        let f = fixture();
+        let src = f.src.join("IMG_1.CR3");
+        write(&src, "new photo");
+        let part = f.dst.join(".IMG_1.CR3.pbpart");
+        write(&part, "last copy of another photo");
+        let out = transfer_item(
+            std::slice::from_ref(&src),
+            &f.dst,
+            OpKind::Copy,
+            ConflictPolicy::Skip,
+        );
+        assert!(matches!(out, TransferOutcome::Failed(_)), "{out:?}");
+        assert_eq!(
+            fs::read_to_string(&part).unwrap(),
+            "last copy of another photo"
+        );
+        assert!(!f.dst.join("IMG_1.CR3").exists());
+        assert_eq!(fs::read_to_string(&src).unwrap(), "new photo");
+    }
+
+    #[test]
+    fn sync_dir_succeeds_on_a_regular_folder() {
+        let f = fixture();
+        sync_dir(&f.dst).unwrap();
     }
 
     #[test]
