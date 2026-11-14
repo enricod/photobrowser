@@ -164,4 +164,5 @@ pub fn build(app: &adw::Application, start_folder: Option<PathBuf>) {
         None => state.widgets().stack.set_visible_child_name("empty"),
     }
     window.present();
+    state.show_startup_warnings();
 }

@@ -92,6 +92,8 @@ pub struct Widgets {
 pub struct AppState {
     pub config: RefCell<Config>,
     pub index: RefCell<Index>,
+    /// Why the on-disk index could not be opened, if the app fell back to an in-memory one.
+    index_unavailable: Option<String>,
     pub pool: JobPool,
     pub disk: Arc<DiskCache>,
     pub tx: async_channel::Sender<Msg>,
@@ -235,12 +237,14 @@ impl AppState {
         msg_rx: async_channel::Receiver<Msg>,
     ) -> Rc<AppState> {
         let config = Config::load_from(&Config::default_path());
-        let index = Index::open(&Index::default_path())
-            .or_else(|e| {
+        let (index, index_unavailable) = match Index::open(&Index::default_path()) {
+            Ok(index) => (index, None),
+            Err(e) => {
                 eprintln!("index unavailable ({e}); using an in-memory index");
-                Index::open_in_memory()
-            })
-            .expect("SQLite is unusable");
+                let index = Index::open_in_memory().expect("SQLite is unusable");
+                (index, Some(e.to_string()))
+            }
+        };
         let disk = DiskCache::new(DiskCache::default_dir(), config.disk_cache_mb * 1024 * 1024)
             .expect("cannot create the thumbnail cache directory");
 
@@ -269,6 +273,7 @@ impl AppState {
         Rc::new(AppState {
             config: RefCell::new(config),
             index: RefCell::new(index),
+            index_unavailable,
             pool: JobPool::new(JobPool::default_threads()),
             disk: Arc::new(disk),
             tx,
@@ -318,6 +323,17 @@ impl AppState {
 
     pub fn toast(&self, text: &str) {
         self.widgets().toasts.add_toast(adw::Toast::new(text));
+    }
+
+    /// Warnings about the session that the user should see once the window is up.
+    pub fn show_startup_warnings(&self) {
+        if let Some(reason) = &self.index_unavailable {
+            let toast = adw::Toast::new(&format!(
+                "Index unavailable ({reason}): ratings are only saved to sidecars this session"
+            ));
+            toast.set_timeout(0); // stays until dismissed
+            self.widgets().toasts.add_toast(toast);
+        }
     }
 
     pub fn folder(&self) -> Option<PathBuf> {
