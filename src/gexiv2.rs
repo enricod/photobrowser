@@ -42,13 +42,22 @@ mod sys {
     pub type GBoolean = c_int;
     pub const GEXIV2_LOG_LEVEL_MUTE: c_int = 4;
 
+    // The `try_*` names exist in both 0.14 and 0.16, but 0.16 deprecates them in favour of
+    // plain names with identical signatures. Under `cfg(gexiv2_016)` (set by build.rs) each
+    // `try_*` declaration links to the plain symbol, so call sites stay version-agnostic.
     unsafe extern "C" {
         pub fn g_object_unref(object: *mut c_void);
         pub fn g_free(mem: *mut c_void);
         pub fn g_error_free(error: *mut GError);
+        #[cfg(test)]
+        pub fn g_quark_from_static_string(string: *const c_char) -> u32;
+        #[cfg(test)]
+        pub fn g_error_new_literal(domain: u32, code: c_int, message: *const c_char)
+        -> *mut GError;
 
         pub fn gexiv2_initialize() -> GBoolean;
         pub fn gexiv2_log_set_level(level: c_int);
+        #[cfg_attr(gexiv2_016, link_name = "gexiv2_metadata_register_xmp_namespace")]
         pub fn gexiv2_metadata_try_register_xmp_namespace(
             name: *const c_char,
             prefix: *const c_char,
@@ -73,42 +82,50 @@ mod sys {
             error: *mut *mut GError,
         ) -> GBoolean;
 
+        #[cfg_attr(gexiv2_016, link_name = "gexiv2_metadata_has_tag")]
         pub fn gexiv2_metadata_try_has_tag(
             this: *mut GExiv2Metadata,
             tag: *const c_char,
             error: *mut *mut GError,
         ) -> GBoolean;
+        #[cfg_attr(gexiv2_016, link_name = "gexiv2_metadata_get_tag_string")]
         pub fn gexiv2_metadata_try_get_tag_string(
             this: *mut GExiv2Metadata,
             tag: *const c_char,
             error: *mut *mut GError,
         ) -> *mut c_char;
+        #[cfg_attr(gexiv2_016, link_name = "gexiv2_metadata_set_tag_string")]
         pub fn gexiv2_metadata_try_set_tag_string(
             this: *mut GExiv2Metadata,
             tag: *const c_char,
             value: *const c_char,
             error: *mut *mut GError,
         ) -> GBoolean;
+        #[cfg_attr(gexiv2_016, link_name = "gexiv2_metadata_get_tag_long")]
         pub fn gexiv2_metadata_try_get_tag_long(
             this: *mut GExiv2Metadata,
             tag: *const c_char,
             error: *mut *mut GError,
         ) -> c_long;
 
+        #[cfg_attr(gexiv2_016, link_name = "gexiv2_metadata_get_exposure_time")]
         pub fn gexiv2_metadata_try_get_exposure_time(
             this: *mut GExiv2Metadata,
             nom: *mut c_int,
             den: *mut c_int,
             error: *mut *mut GError,
         ) -> GBoolean;
+        #[cfg_attr(gexiv2_016, link_name = "gexiv2_metadata_get_fnumber")]
         pub fn gexiv2_metadata_try_get_fnumber(
             this: *mut GExiv2Metadata,
             error: *mut *mut GError,
         ) -> c_double;
+        #[cfg_attr(gexiv2_016, link_name = "gexiv2_metadata_get_iso_speed")]
         pub fn gexiv2_metadata_try_get_iso_speed(
             this: *mut GExiv2Metadata,
             error: *mut *mut GError,
         ) -> c_int;
+        #[cfg_attr(gexiv2_016, link_name = "gexiv2_metadata_get_focal_length")]
         pub fn gexiv2_metadata_try_get_focal_length(
             this: *mut GExiv2Metadata,
             error: *mut *mut GError,
@@ -122,6 +139,7 @@ mod sys {
         pub fn gexiv2_preview_properties_get_extension(
             this: *mut GExiv2PreviewProperties,
         ) -> *const c_char;
+        #[cfg_attr(gexiv2_016, link_name = "gexiv2_metadata_get_preview_image")]
         pub fn gexiv2_metadata_try_get_preview_image(
             this: *mut GExiv2Metadata,
             props: *mut GExiv2PreviewProperties,
@@ -175,6 +193,39 @@ fn with_error<T>(f: impl FnOnce(*mut *mut sys::GError) -> T) -> Result<T> {
     match unsafe { take_error(err) } {
         Some(e) => Err(e),
         None => Ok(value),
+    }
+}
+
+/// An owned `gchar*` returned by gexiv2, released with `g_free`. May be null.
+///
+/// Returned from `with_error` closures so the string is freed even when the call also sets an
+/// error and `with_error` discards the value.
+struct GString(*mut c_char);
+
+impl GString {
+    fn as_c_str(&self) -> Option<&CStr> {
+        (!self.0.is_null()).then(|| unsafe { CStr::from_ptr(self.0) })
+    }
+}
+
+impl Drop for GString {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { sys::g_free(self.0.cast()) }
+        }
+    }
+}
+
+/// An owned `GExiv2PreviewImage*`, released with `g_object_unref`. May be null.
+///
+/// Like `GString`, this frees the image when a call returns one and also sets an error.
+struct PreviewImage(*mut sys::GExiv2PreviewImage);
+
+impl Drop for PreviewImage {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { sys::g_object_unref(self.0.cast()) }
+        }
     }
 }
 
@@ -263,25 +314,19 @@ impl Metadata {
         check(ok, err)
     }
 
-    pub fn has_tag(&self, tag: &str) -> bool {
-        let Ok(tag) = cstring(tag) else { return false };
+    pub fn has_tag(&self, tag: &str) -> Result<bool> {
+        let tag = cstring(tag)?;
         with_error(|e| unsafe { sys::gexiv2_metadata_try_has_tag(self.raw, tag.as_ptr(), e) })
-            .is_ok_and(|v| v != 0)
+            .map(|v| v != 0)
     }
 
     pub fn get_tag_string(&self, tag: &str) -> Result<String> {
         let tag = cstring(tag)?;
-        let value = with_error(|e| unsafe {
-            sys::gexiv2_metadata_try_get_tag_string(self.raw, tag.as_ptr(), e)
+        let value = with_error(|e| {
+            GString(unsafe { sys::gexiv2_metadata_try_get_tag_string(self.raw, tag.as_ptr(), e) })
         })?;
-        if value.is_null() {
-            return Err(Error::NoValue);
-        }
-        let s = unsafe { CStr::from_ptr(value) }
-            .to_string_lossy()
-            .into_owned();
-        unsafe { sys::g_free(value.cast()) };
-        Ok(s)
+        let s = value.as_c_str().ok_or(Error::NoValue)?;
+        Ok(s.to_string_lossy().into_owned())
     }
 
     pub fn set_tag_string(&self, tag: &str, value: &str) -> Result<()> {
@@ -383,22 +428,70 @@ impl Preview<'_> {
     }
 
     pub fn data(&self) -> Result<Vec<u8>> {
-        let image = with_error(|e| unsafe {
-            sys::gexiv2_metadata_try_get_preview_image(self.meta.raw, self.props, e)
+        let image = with_error(|e| {
+            PreviewImage(unsafe {
+                sys::gexiv2_metadata_try_get_preview_image(self.meta.raw, self.props, e)
+            })
         })?;
-        if image.is_null() {
+        if image.0.is_null() {
             return Err(Error::NoValue);
         }
         let mut size: c_uint = 0;
-        let result = unsafe {
-            let data = sys::gexiv2_preview_image_get_data(image, &mut size);
-            if data.is_null() {
-                Err(Error::NoValue)
-            } else {
-                Ok(std::slice::from_raw_parts(data, size as usize).to_vec())
-            }
-        };
-        unsafe { sys::g_object_unref(image.cast()) };
-        result
+        let data = unsafe { sys::gexiv2_preview_image_get_data(image.0, &mut size) };
+        if data.is_null() {
+            return Err(Error::NoValue);
+        }
+        // `image` owns the buffer and outlives this copy.
+        Ok(unsafe { std::slice::from_raw_parts(data, size as usize) }.to_vec())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    struct DropFlag<'a>(&'a Cell<bool>);
+
+    impl Drop for DropFlag<'_> {
+        fn drop(&mut self) {
+            self.0.set(true);
+        }
+    }
+
+    fn set_error(slot: *mut *mut sys::GError, message: &CStr) {
+        unsafe {
+            let domain = sys::g_quark_from_static_string(c"photobrowser-test".as_ptr());
+            *slot = sys::g_error_new_literal(domain, 1, message.as_ptr());
+        }
+    }
+
+    #[test]
+    fn with_error_drops_value_when_error_is_set() {
+        let dropped = Cell::new(false);
+        let result = with_error(|e| {
+            set_error(e, c"boom");
+            DropFlag(&dropped)
+        });
+        assert!(matches!(result, Err(Error::Gexiv2(ref m)) if m == "boom"));
+        assert!(
+            dropped.get(),
+            "value returned alongside an error must be dropped"
+        );
+    }
+
+    #[test]
+    fn with_error_returns_value_when_no_error() {
+        let dropped = Cell::new(false);
+        let result = with_error(|_| DropFlag(&dropped));
+        assert!(result.is_ok());
+        assert!(!dropped.get());
+    }
+
+    #[test]
+    fn null_owned_pointers_drop_safely() {
+        drop(GString(ptr::null_mut()));
+        drop(PreviewImage(ptr::null_mut()));
+        assert!(GString(ptr::null_mut()).as_c_str().is_none());
     }
 }
