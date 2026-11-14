@@ -224,6 +224,45 @@ pub fn transfer_item(
     TransferOutcome::Done(done)
 }
 
+/// Like `transfer_item`, but first creates `dest_dir` and any missing parents (for organizing
+/// into dated folders). Folders it created are removed again if the item did not land in
+/// them (skipped or failed), so a run leaves no empty folders behind.
+pub fn transfer_item_creating_dest(
+    sources: &[PathBuf],
+    dest_dir: &Path,
+    kind: OpKind,
+    policy: ConflictPolicy,
+) -> TransferOutcome {
+    let created = missing_dirs(dest_dir);
+    if let Err(e) = fs::create_dir_all(dest_dir) {
+        return TransferOutcome::Failed(format!("{}: {e}", dest_dir.display()));
+    }
+    let outcome = transfer_item(sources, dest_dir, kind, policy);
+    if !matches!(outcome, TransferOutcome::Done(_)) {
+        // Deepest first; `remove_dir` refuses a folder something else has put files in.
+        for dir in &created {
+            if fs::remove_dir(dir).is_err() {
+                break;
+            }
+        }
+    }
+    outcome
+}
+
+/// `dir` and those of its ancestors that do not exist yet, deepest first.
+fn missing_dirs(dir: &Path) -> Vec<PathBuf> {
+    let mut missing = Vec::new();
+    let mut current = Some(dir);
+    while let Some(d) = current {
+        if d.as_os_str().is_empty() || exists(d) {
+            break;
+        }
+        missing.push(d.to_path_buf());
+        current = d.parent();
+    }
+    missing
+}
+
 fn transfer_one(src: &Path, dst: &Path, kind: OpKind) -> io::Result<()> {
     if exists(dst) {
         return Err(io::Error::new(
@@ -625,6 +664,82 @@ mod tests {
             fs::read_to_string(f.dst.join("IMG_1_02.CR3.xmp")).unwrap(),
             "someone else's"
         );
+    }
+
+    #[test]
+    fn organizing_creates_dated_folders_and_moves_items_into_them() {
+        use crate::organize::{OrganizePattern, plan};
+        use chrono::NaiveDate;
+        let f = fixture();
+        let a = pair(&f); // IMG_1.CR3 (+ sidecar) and IMG_1.JPG
+        let b = f.src.join("IMG_2.JPG");
+        write(&b, "jpg");
+        let c = f.src.join("IMG_3.JPG");
+        write(&c, "jpg");
+        let day = |d| NaiveDate::from_ymd_opt(2026, 11, d);
+        let p = plan(
+            &[day(14), day(14), day(15)],
+            &f.dst,
+            OrganizePattern::YearThenDay,
+        );
+        for (sources, dest) in [vec![a[0].clone(), a[1].clone()], vec![b], vec![c]]
+            .iter()
+            .zip(&p.destinations)
+        {
+            let out = transfer_item_creating_dest(
+                sources,
+                dest.as_ref().unwrap(),
+                OpKind::Move,
+                ConflictPolicy::Skip,
+            );
+            assert!(matches!(out, TransferOutcome::Done(_)), "{out:?}");
+        }
+        assert_eq!(names(&f.dst), ["2026"]);
+        assert_eq!(
+            names(&f.dst.join("2026/2026-11-14")),
+            ["IMG_1.CR3", "IMG_1.CR3.xmp", "IMG_1.JPG", "IMG_2.JPG"]
+        );
+        assert_eq!(names(&f.dst.join("2026/2026-11-15")), ["IMG_3.JPG"]);
+        assert!(names(&f.src).is_empty());
+    }
+
+    #[test]
+    fn skipped_item_keeps_existing_dated_folders() {
+        let f = fixture();
+        let src = f.src.join("IMG_1.JPG");
+        write(&src, "new");
+        // The day folder already exists and the name is taken: Skip leaves the photo.
+        let existing = f.dst.join("2026/2026-11-14");
+        fs::create_dir_all(&existing).unwrap();
+        write(&existing.join("IMG_1.JPG"), "existing");
+        let out = transfer_item_creating_dest(
+            std::slice::from_ref(&src),
+            &existing,
+            OpKind::Move,
+            ConflictPolicy::Skip,
+        );
+        assert_eq!(out, TransferOutcome::Skipped);
+        assert!(existing.exists(), "a folder that existed before is kept");
+        assert_eq!(fs::read_to_string(&src).unwrap(), "new");
+    }
+
+    #[test]
+    fn failed_item_removes_only_the_folders_it_created() {
+        let f = fixture();
+        let missing = f.src.join("gone.JPG"); // never written: the move fails
+        let dest = f.dst.join("2026/2026-11-14");
+        let out = transfer_item_creating_dest(
+            std::slice::from_ref(&missing),
+            &dest,
+            OpKind::Move,
+            ConflictPolicy::Skip,
+        );
+        assert!(matches!(out, TransferOutcome::Failed(_)), "{out:?}");
+        assert!(
+            !f.dst.join("2026").exists(),
+            "created folders removed again"
+        );
+        assert!(f.dst.exists(), "the root existed before and is kept");
     }
 
     #[test]

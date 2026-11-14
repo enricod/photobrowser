@@ -8,7 +8,8 @@ use gtk::glib;
 use super::pathbar::PathBar;
 use super::state::{AppState, Widgets};
 use super::viewer::Viewer;
-use super::{filterbar, grid, keys, prefs, style};
+use super::{dialogs, filterbar, grid, keys, prefs, style};
+use crate::fileops::OpKind;
 
 pub fn build(app: &adw::Application, start_folder: Option<PathBuf>) {
     let (tx, rx) = async_channel::unbounded();
@@ -32,7 +33,14 @@ pub fn build(app: &adw::Application, start_folder: Option<PathBuf>) {
     counter.add_css_class("numeric");
     header.pack_end(&counter);
     let menu = gio::Menu::new();
-    menu.append(Some("Preferences"), Some("win.preferences"));
+    let file_ops = gio::Menu::new();
+    file_ops.append(Some("Move to…"), Some("win.move"));
+    file_ops.append(Some("Copy to…"), Some("win.copy"));
+    file_ops.append(Some("Organize…"), Some("win.organize"));
+    menu.append_section(None, &file_ops);
+    let app_section = gio::Menu::new();
+    app_section.append(Some("Preferences"), Some("win.preferences"));
+    menu.append_section(None, &app_section);
     let menu_button = gtk::MenuButton::builder()
         .icon_name("open-menu-symbolic")
         .menu_model(&menu)
@@ -94,22 +102,61 @@ pub fn build(app: &adw::Application, start_folder: Option<PathBuf>) {
     let preferences = gio::ActionEntry::builder("preferences")
         .activate(move |_: &adw::ApplicationWindow, _, _| prefs::show(&s))
         .build();
-    window.add_action_entries([preferences]);
+    let s = state.clone();
+    let move_to = gio::ActionEntry::builder("move")
+        .activate(move |_: &adw::ApplicationWindow, _, _| {
+            dialogs::choose_destination(&s, OpKind::Move)
+        })
+        .build();
+    let s = state.clone();
+    let copy_to = gio::ActionEntry::builder("copy")
+        .activate(move |_: &adw::ApplicationWindow, _, _| {
+            dialogs::choose_destination(&s, OpKind::Copy)
+        })
+        .build();
+    let s = state.clone();
+    let organize = gio::ActionEntry::builder("organize")
+        .activate(move |_: &adw::ApplicationWindow, _, _| dialogs::organize(&s))
+        .build();
+    window.add_action_entries([preferences, move_to, copy_to, organize]);
+    // Move/Copy/Organize act on what M and C act on: the grid selection, or the photo
+    // shown in the viewer. Enabled only when there is one.
+    let update_actions = {
+        let (s, w) = (state.clone(), window.downgrade());
+        move || {
+            let Some(w) = w.upgrade() else { return };
+            let enabled = !s.rating_targets().is_empty();
+            for name in ["move", "copy", "organize"] {
+                if let Some(action) = w.lookup_action(name).and_downcast::<gio::SimpleAction>() {
+                    action.set_enabled(enabled);
+                }
+            }
+        }
+    };
+    update_actions();
+    let update = update_actions.clone();
+    state
+        .widgets()
+        .stack
+        .connect_visible_child_name_notify(move |_| update());
 
     for button in [&open_button, &empty_button] {
         let s = state.clone();
         button.connect_clicked(move |_| s.choose_folder());
     }
     let s = state.clone();
+    let update = update_actions.clone();
     state.selection.connect_items_changed(move |_, _, _, _| {
         s.update_counter();
         s.queue_viewer_sync();
+        update();
     });
 
     let s = state.clone();
     state.selection.connect_selection_changed(move |_, _, _| {
         s.unpin();
         s.follow_selection();
+        update_actions();
     });
 
     let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
