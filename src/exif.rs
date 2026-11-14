@@ -104,8 +104,10 @@ pub fn parse_exif_datetime(s: &str) -> Option<i64> {
 
 /// EXIF orientation 1–8 (1 when missing or invalid).
 pub fn orientation(meta: &Metadata) -> u8 {
-    let v = meta.get_tag_numeric("Exif.Image.Orientation");
-    if (1..=8).contains(&v) { v as u8 } else { 1 }
+    match meta.get_tag_long("Exif.Image.Orientation") {
+        Ok(v @ 1..=8) => v as u8,
+        _ => 1,
+    }
 }
 
 pub fn capture_time(path: &Path) -> Option<i64> {
@@ -253,6 +255,40 @@ mod tests {
     /// `EXIV2_LOCK`. The one way around them is calling the C function directly, so each
     /// locked entry point must be called exactly once in `gexiv2.rs`: inside its guarded
     /// method (`Preview::data` is guarded through the borrow `get_preview_images` returns).
+    #[test]
+    fn orientation_falls_back_to_normal_outside_1_to_8() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("o.jpg");
+        write_jpeg(&path, 8, 8, [0, 0, 0]);
+        let read = |p: &Path| orientation(&open_path(p).unwrap());
+        assert_eq!(read(&path), 1, "missing tag");
+        for (value, expected) in [("6", 6), ("8", 8), ("0", 1), ("9", 1), ("65535", 1)] {
+            set_exif(&path, "Exif.Image.Orientation", value);
+            assert_eq!(read(&path), expected, "Orientation={value}");
+        }
+    }
+
+    #[test]
+    fn get_tag_long_reports_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.jpg");
+        write_jpeg(&path, 8, 8, [0, 0, 0]);
+        set_exif(&path, "Exif.Image.ImageWidth", "4294967295");
+        let meta = open_path(&path).unwrap();
+        assert_eq!(
+            meta.get_tag_long("Exif.Image.ImageWidth"),
+            Ok(4_294_967_295)
+        );
+        assert!(matches!(
+            meta.get_tag_long("Bogus.x.y"),
+            Err(gexiv2::Error::Gexiv2(_))
+        ));
+        assert_eq!(
+            meta.get_tag_long("Exif.Image.Orien\0tation"),
+            Err(gexiv2::Error::Nul)
+        );
+    }
+
     #[test]
     fn jpeg_extension_matching() {
         for ext in [".jpg", ".JPG", "jpg", ".Jpg"] {

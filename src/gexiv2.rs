@@ -323,12 +323,14 @@ impl Metadata {
     }
 
     /// The tag's integer value; 0 when missing or not numeric.
-    pub fn get_tag_numeric(&self, tag: &str) -> i32 {
-        let Ok(tag) = cstring(tag) else { return 0 };
+    /// The tag's value as an integer, without narrowing. gexiv2 returns 0 for a missing tag;
+    /// check `has_tag` first where that matters.
+    // `c_long` is i64 on 64-bit Linux but i32 on 32-bit targets, so the conversion is not a no-op.
+    #[allow(clippy::useless_conversion)]
+    pub fn get_tag_long(&self, tag: &str) -> Result<i64> {
+        let tag = cstring(tag)?;
         with_error(|e| unsafe { sys::gexiv2_metadata_try_get_tag_long(self.raw, tag.as_ptr(), e) })
-            .ok()
-            .and_then(|v| i32::try_from(v).ok())
-            .unwrap_or(0)
+            .map(i64::from)
     }
 
     /// Exposure time as (numerator, denominator).
