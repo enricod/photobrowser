@@ -42,6 +42,7 @@ pub fn build(app: &adw::Application, start_folder: Option<PathBuf>) {
     let app_section = gio::Menu::new();
     app_section.append(Some("Keyboard Shortcuts"), Some("win.shortcuts"));
     app_section.append(Some("Preferences"), Some("win.preferences"));
+    app_section.append(Some("About Photobrowser"), Some("win.about"));
     menu.append_section(None, &app_section);
     let menu_button = gtk::MenuButton::builder()
         .icon_name("open-menu-symbolic")
@@ -144,7 +145,11 @@ pub fn build(app: &adw::Application, start_folder: Option<PathBuf>) {
     let shortcuts = gio::ActionEntry::builder("shortcuts")
         .activate(move |_: &adw::ApplicationWindow, _, _| dialogs::shortcuts(&s))
         .build();
-    window.add_action_entries([preferences, move_to, copy_to, organize, shortcuts]);
+    let s = state.clone();
+    let about = gio::ActionEntry::builder("about")
+        .activate(move |_: &adw::ApplicationWindow, _, _| dialogs::about(&s))
+        .build();
+    window.add_action_entries([preferences, move_to, copy_to, organize, shortcuts, about]);
     // Move/Copy/Organize act on what M and C act on: the grid selection, or the photo
     // shown in the viewer. Enabled only when there is one.
     let update_actions = {

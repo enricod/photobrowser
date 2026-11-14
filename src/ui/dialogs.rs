@@ -252,3 +252,18 @@ pub fn shortcuts(state: &Rc<AppState>) {
     }
     dialog.present(Some(&state.widgets().window));
 }
+
+/// The standard About window.
+pub fn about(state: &Rc<AppState>) {
+    let dialog = adw::AboutDialog::builder()
+        .application_name("Photobrowser")
+        .application_icon("folder-pictures")
+        .version(env!("CARGO_PKG_VERSION"))
+        .developer_name("Enrico Donelli")
+        .copyright("© 2026 Enrico Donelli")
+        .license_type(gtk::License::Gpl30)
+        .website("https://github.com/enricod/photobrowser")
+        .issue_url("https://github.com/enricod/photobrowser/issues")
+        .build();
+    dialog.present(Some(&state.widgets().window));
+}

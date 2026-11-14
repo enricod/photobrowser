@@ -78,8 +78,8 @@ Ratings apply to the selection in the grid and to the current image in the full 
 
 The main menu (top-right of the header bar) has **Move to…**, **Copy to…** and
 **Organize…** (sort the selection into `YYYY/YYYY-MM-DD` folders by shot date),
-**Keyboard Shortcuts**, and a **Preferences** dialog for auto-advance after rating
-and the in-memory/disk cache sizes.
+**Keyboard Shortcuts**, a **Preferences** dialog for auto-advance after rating
+and the in-memory/disk cache sizes, and **About Photobrowser**.
 
 The bar under the header shows the open folder, with a ↑ button to open its
 parent. Tick **Show folders** there to list its subfolders above the grid:
