@@ -14,6 +14,8 @@ use std::ffi::{CStr, CString, OsStr, c_char, c_double, c_int, c_long, c_uint, c_
 use std::os::unix::ffi::OsStrExt;
 use std::ptr;
 
+use crate::exif;
+
 mod sys {
     use super::*;
 
@@ -229,9 +231,9 @@ impl Drop for PreviewImage {
     }
 }
 
-fn check(ok: sys::GBoolean, err: Result<()>) -> Result<()> {
-    err?;
-    if ok == 0 {
+/// Calls a gexiv2 function that reports success as a gboolean plus an optional GError.
+fn call_bool(f: impl FnOnce(*mut *mut sys::GError) -> sys::GBoolean) -> Result<()> {
+    if with_error(f)? == 0 {
         return Err(Error::Gexiv2("gexiv2 call failed".into()));
     }
     Ok(())
@@ -250,13 +252,9 @@ pub fn mute_log() {
 
 pub fn register_xmp_namespace(name: &str, prefix: &str) -> Result<()> {
     let (name, prefix) = (cstring(name)?, cstring(prefix)?);
-    let mut ok = 0;
-    let err = with_error(|e| {
-        ok = unsafe {
-            sys::gexiv2_metadata_try_register_xmp_namespace(name.as_ptr(), prefix.as_ptr(), e)
-        };
-    });
-    check(ok, err)
+    call_bool(|e| unsafe {
+        sys::gexiv2_metadata_try_register_xmp_namespace(name.as_ptr(), prefix.as_ptr(), e)
+    })
 }
 
 /// A file's or buffer's metadata. Not `Send`: used on the thread that opened it.
@@ -279,39 +277,27 @@ impl Metadata {
         Ok(Metadata { raw })
     }
 
-    /// Use `crate::exif::open_path` instead: it holds the exiv2 lock.
-    pub(crate) fn new_from_path(path: &OsStr) -> Result<Metadata> {
+    /// Use `crate::exif::open_path`: only it can provide the lock guard.
+    pub(crate) fn new_from_path(path: &OsStr, _lock: &exif::Shared<'_>) -> Result<Metadata> {
         let c_path = cstring(path.as_bytes())?;
         let meta = Metadata::new()?;
-        let mut ok = 0;
-        let err = with_error(|e| {
-            ok = unsafe { sys::gexiv2_metadata_open_path(meta.raw, c_path.as_ptr(), e) };
-        });
-        check(ok, err)?;
+        call_bool(|e| unsafe { sys::gexiv2_metadata_open_path(meta.raw, c_path.as_ptr(), e) })?;
         Ok(meta)
     }
 
-    /// Use `crate::exif::open_buffer` instead: it holds the exiv2 lock.
-    pub(crate) fn new_from_buffer(data: &[u8]) -> Result<Metadata> {
+    /// Use `crate::exif::open_buffer`: only it can provide the lock guard.
+    pub(crate) fn new_from_buffer(data: &[u8], _lock: &exif::Shared<'_>) -> Result<Metadata> {
         let len =
             c_long::try_from(data.len()).map_err(|_| Error::Gexiv2("buffer too large".into()))?;
         let meta = Metadata::new()?;
-        let mut ok = 0;
-        let err = with_error(|e| {
-            ok = unsafe { sys::gexiv2_metadata_open_buf(meta.raw, data.as_ptr(), len, e) };
-        });
-        check(ok, err)?;
+        call_bool(|e| unsafe { sys::gexiv2_metadata_open_buf(meta.raw, data.as_ptr(), len, e) })?;
         Ok(meta)
     }
 
-    /// Use `crate::exif::save` instead: it holds the exiv2 lock.
-    pub(crate) fn save_to_file(&self, path: &OsStr) -> Result<()> {
+    /// Use `crate::exif::save`: only it can provide the lock guard.
+    pub(crate) fn save_to_file(&self, path: &OsStr, _lock: &exif::Exclusive<'_>) -> Result<()> {
         let c_path = cstring(path.as_bytes())?;
-        let mut ok = 0;
-        let err = with_error(|e| {
-            ok = unsafe { sys::gexiv2_metadata_save_file(self.raw, c_path.as_ptr(), e) };
-        });
-        check(ok, err)
+        call_bool(|e| unsafe { sys::gexiv2_metadata_save_file(self.raw, c_path.as_ptr(), e) })
     }
 
     pub fn has_tag(&self, tag: &str) -> Result<bool> {
@@ -331,22 +317,20 @@ impl Metadata {
 
     pub fn set_tag_string(&self, tag: &str, value: &str) -> Result<()> {
         let (tag, value) = (cstring(tag)?, cstring(value)?);
-        let mut ok = 0;
-        let err = with_error(|e| {
-            ok = unsafe {
-                sys::gexiv2_metadata_try_set_tag_string(self.raw, tag.as_ptr(), value.as_ptr(), e)
-            };
-        });
-        check(ok, err)
+        call_bool(|e| unsafe {
+            sys::gexiv2_metadata_try_set_tag_string(self.raw, tag.as_ptr(), value.as_ptr(), e)
+        })
     }
 
     /// The tag's integer value; 0 when missing or not numeric.
-    pub fn get_tag_numeric(&self, tag: &str) -> i32 {
-        let Ok(tag) = cstring(tag) else { return 0 };
+    /// The tag's value as an integer, without narrowing. gexiv2 returns 0 for a missing tag;
+    /// check `has_tag` first where that matters.
+    // `c_long` is i64 on 64-bit Linux but i32 on 32-bit targets, so the conversion is not a no-op.
+    #[allow(clippy::useless_conversion)]
+    pub fn get_tag_long(&self, tag: &str) -> Result<i64> {
+        let tag = cstring(tag)?;
         with_error(|e| unsafe { sys::gexiv2_metadata_try_get_tag_long(self.raw, tag.as_ptr(), e) })
-            .ok()
-            .and_then(|v| i32::try_from(v).ok())
-            .unwrap_or(0)
+            .map(i64::from)
     }
 
     /// Exposure time as (numerator, denominator).
@@ -377,9 +361,12 @@ impl Metadata {
             .filter(|v| *v >= 0.0)
     }
 
-    /// Embedded previews. Use `crate::exif::largest_jpeg_preview` instead: it holds the
-    /// exiv2 lock.
-    pub(crate) fn get_preview_images(&self) -> Vec<Preview<'_>> {
+    /// Embedded previews. Use `crate::exif::largest_jpeg_preview`: only it can provide the
+    /// lock guard. The previews borrow the guard, so `Preview::data` can only run under it.
+    pub(crate) fn get_preview_images<'a>(
+        &'a self,
+        _lock: &'a exif::Shared<'_>,
+    ) -> Vec<Preview<'a>> {
         let list = unsafe { sys::gexiv2_metadata_get_preview_properties(self.raw) };
         let mut out = Vec::new();
         if list.is_null() {
@@ -399,7 +386,7 @@ impl Metadata {
     }
 }
 
-/// One embedded preview; borrows the metadata that owns it.
+/// One embedded preview; borrows the metadata that owns it and the exiv2 lock guard.
 pub struct Preview<'a> {
     meta: &'a Metadata,
     props: *mut sys::GExiv2PreviewProperties,
@@ -415,16 +402,10 @@ impl Preview<'_> {
     }
 
     /// File extension including the dot, e.g. ".jpg".
-    pub fn extension(&self) -> Option<String> {
+    /// Borrowed from the preview properties, which the metadata object owns.
+    pub fn extension(&self) -> Option<&CStr> {
         let ext = unsafe { sys::gexiv2_preview_properties_get_extension(self.props) };
-        if ext.is_null() {
-            return None;
-        }
-        Some(
-            unsafe { CStr::from_ptr(ext) }
-                .to_string_lossy()
-                .into_owned(),
-        )
+        (!ext.is_null()).then(|| unsafe { CStr::from_ptr(ext) })
     }
 
     pub fn data(&self) -> Result<Vec<u8>> {
