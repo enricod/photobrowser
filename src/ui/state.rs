@@ -625,11 +625,17 @@ impl AppState {
         for id in diff.removed {
             self.remove_object(id);
         }
+        // The viewer keeps its last item after closing: only refresh it while it is shown.
+        let viewed = self
+            .viewer_active()
+            .then(|| self.widgets().viewer.current_id())
+            .flatten();
         for update in diff.updated {
             let Some(obj) = self.object(update.item.id) else {
                 continue;
             };
             let mut item = update.item;
+            let changed_on_disk = obj.with_item(|old| files_changed(&old.files, &item.files));
             // The index is the truth for ratings: it keeps pending local edits.
             let rec = self
                 .index
@@ -642,6 +648,12 @@ impl AppState {
                 item.rejected = rec.rejected;
             }
             obj.set_item(item);
+            if changed_on_disk {
+                self.forget_full_size(obj.id());
+            }
+            if viewed == Some(obj.id()) {
+                self.refresh_viewed(&obj, changed_on_disk);
+            }
             if update.display_changed {
                 // A request still in flight decodes the old file: supersede it.
                 self.cancel_thumb(obj.id());
@@ -1170,9 +1182,12 @@ impl AppState {
     fn on_full(&self, id: ItemId, generation: u64, zoom: Zoom, result: Result<Rgba, String>) {
         // The same decode may still be queued (after a requeue): one result is enough.
         let pending = self.pending_full.borrow_mut().remove(&(id, zoom));
-        if let Some((_, token)) = pending {
-            token.cancel();
-        }
+        let Some((_, token)) = pending else {
+            // Its request was withdrawn (the file changed on disk, or the item left the
+            // prefetch window) while the decode was already running: don't cache it.
+            return;
+        };
+        token.cancel();
         if generation != self.generation.get() {
             return;
         }
@@ -1189,6 +1204,37 @@ impl AppState {
             Err(e) if is_current => self.toast(&format!("Couldn't open image: {e}")),
             Err(_) => {}
         }
+    }
+
+    /// Drops everything derived from an item's files: full-size textures, decodes in flight
+    /// and EXIF. Used when a rescan finds the files changed on disk.
+    fn forget_full_size(&self, id: ItemId) {
+        self.full_cache.borrow_mut().pop(&id);
+        self.actual_cache.borrow_mut().pop(&id);
+        self.exif_cache.borrow_mut().remove(&id);
+        self.pending_full
+            .borrow_mut()
+            .retain(|(pending_id, _), (_, token)| {
+                let keep = *pending_id != id;
+                if !keep {
+                    token.cancel();
+                }
+                keep
+            });
+    }
+
+    /// Brings the viewer up to date with a rescanned version of the item it shows: always
+    /// its rating and info; if its files changed, a fresh decode at the current zoom (the old
+    /// image stays until it arrives) and fresh EXIF.
+    fn refresh_viewed(&self, obj: &ItemObject, changed_on_disk: bool) {
+        let viewer = self.widgets().viewer.clone();
+        if changed_on_disk {
+            self.request_full(obj, viewer.zoom(), Priority::Current);
+            if viewer.info_visible() {
+                self.request_exif(obj);
+            }
+        }
+        self.refresh_info();
     }
 
     fn request_exif(&self, obj: &ItemObject) {
@@ -1750,6 +1796,11 @@ fn apply_xmp_result(
     }
 }
 
+/// True if any file of an item was added, removed, or changed size or mtime.
+fn files_changed(old: &[MediaFile], new: &[MediaFile]) -> bool {
+    old != new
+}
+
 /// A folder path for messages, with the home folder shortened to `~` (e.g. "~/Docs").
 fn display_dir(path: &std::path::Path) -> String {
     display_dir_with_home(path, &glib::home_dir())
@@ -1868,6 +1919,26 @@ mod tests {
             display_dir_with_home(std::path::Path::new("/srv/x"), root),
             "/srv/x"
         );
+    }
+
+    fn mf(path: &str, size: u64, mtime_ns: i64) -> MediaFile {
+        MediaFile {
+            path: PathBuf::from(path),
+            kind: crate::media::FileKind::from_path(std::path::Path::new(path)).unwrap(),
+            size,
+            mtime_ns,
+        }
+    }
+
+    #[test]
+    fn files_changed_detects_size_mtime_and_pair_members() {
+        let pair = [mf("/p/a.CR3", 10, 1), mf("/p/a.JPG", 5, 1)];
+        assert!(!files_changed(&pair, &pair.clone()));
+        let raw_edited = [mf("/p/a.CR3", 10, 2), mf("/p/a.JPG", 5, 1)];
+        assert!(files_changed(&pair, &raw_edited), "only the RAW changed");
+        let resized = [mf("/p/a.CR3", 10, 1), mf("/p/a.JPG", 6, 1)];
+        assert!(files_changed(&pair, &resized));
+        assert!(files_changed(&pair, &pair[..1]));
     }
 
     #[test]
