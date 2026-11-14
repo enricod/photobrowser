@@ -20,6 +20,10 @@ pub const CACHE_VERSION: u32 = 1;
 /// use; refreshing only stale entries keeps writes rare while scrolling.
 const TOUCH_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// A temp file older than this cannot belong to a write in progress (those take
+/// milliseconds), even one from another running instance: it was left by a crash.
+const ORPHAN_TMP_AGE: Duration = Duration::from_secs(10 * 60);
+
 pub struct DiskCache {
     dir: PathBuf,
     cap_bytes: u64,
@@ -118,6 +122,7 @@ impl DiskCache {
     /// Deletes the least recently used entries (oldest mtime; `load` refreshes it) until the
     /// cache is within its cap.
     pub fn cleanup(&self) -> io::Result<u64> {
+        self.remove_orphaned_temp_files();
         let mut entries: Vec<(PathBuf, u64, SystemTime)> = fs::read_dir(&self.dir)?
             .filter_map(Result::ok)
             .filter_map(|e| {
@@ -146,6 +151,32 @@ impl DiskCache {
             }
         }
         Ok(removed)
+    }
+}
+
+impl DiskCache {
+    /// Deletes `.…tmp` files left by a `store()` that never reached its rename (the process
+    /// was killed or crashed). They are skipped by eviction and outside the cap, so they
+    /// would otherwise pile up forever.
+    fn remove_orphaned_temp_files(&self) {
+        let Ok(dir) = fs::read_dir(&self.dir) else {
+            return;
+        };
+        let now = SystemTime::now();
+        for entry in dir.filter_map(Result::ok) {
+            let name = entry.file_name();
+            let name = name.as_bytes();
+            if !(name.starts_with(b".") && name.ends_with(b".tmp")) {
+                continue;
+            }
+            let old = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .is_ok_and(|t| now.duration_since(t).is_ok_and(|age| age > ORPHAN_TMP_AGE));
+            if old {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
     }
 }
 
@@ -313,6 +344,29 @@ mod tests {
             .map(|e| e.unwrap().metadata().unwrap().len())
             .sum();
         assert!(total <= cap, "{total} > {cap}");
+    }
+
+    #[test]
+    fn cleanup_removes_orphaned_temp_files_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = DiskCache::new(dir.path().to_path_buf(), u64::MAX).unwrap();
+        let entry = media("/p/a.jpg", 1, 1);
+        cache.store(&entry, &thumb()).unwrap();
+        let orphan = dir.path().join(".abc.123.4.tmp");
+        let in_flight = dir.path().join(".def.456.7.tmp");
+        let other_dotfile = dir.path().join(".keep-me");
+        for p in [&orphan, &in_flight, &other_dotfile] {
+            fs::write(p, b"x").unwrap();
+        }
+        let long_ago = SystemTime::now() - Duration::from_secs(60 * 60);
+        set_mtime(&orphan, long_ago);
+        set_mtime(&other_dotfile, long_ago);
+        set_mtime(&cache.path_for(&entry), long_ago);
+        cache.cleanup().unwrap();
+        assert!(!orphan.exists(), "crash leftover removed");
+        assert!(in_flight.exists(), "a fresh temp file may still be renamed");
+        assert!(other_dotfile.exists(), "only temp files are touched");
+        assert!(cache.contains(&entry), "entries within the cap are kept");
     }
 
     #[test]
