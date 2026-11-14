@@ -95,6 +95,9 @@ pub struct AppState {
     pub pool: JobPool,
     pub disk: Arc<DiskCache>,
     pub tx: async_channel::Sender<Msg>,
+    /// A second handle on the message channel, used only by `shutdown` to process the
+    /// `XmpWritten` results the main loop will no longer get to.
+    msg_rx: async_channel::Receiver<Msg>,
     pub store: gio::ListStore,
     pub filter: gtk::CustomFilter,
     pub sorter: gtk::CustomSorter,
@@ -227,7 +230,10 @@ fn spawn_xmp_writer(
 }
 
 impl AppState {
-    pub fn new(tx: async_channel::Sender<Msg>) -> Rc<AppState> {
+    pub fn new(
+        tx: async_channel::Sender<Msg>,
+        msg_rx: async_channel::Receiver<Msg>,
+    ) -> Rc<AppState> {
         let config = Config::load_from(&Config::default_path());
         let index = Index::open(&Index::default_path())
             .or_else(|e| {
@@ -266,6 +272,7 @@ impl AppState {
             pool: JobPool::new(JobPool::default_threads()),
             disk: Arc::new(disk),
             tx,
+            msg_rx,
             store,
             filter,
             sorter,
@@ -1255,26 +1262,14 @@ impl AppState {
     }
 
     fn on_xmp_written(self: &Rc<Self>, path: PathBuf, result: Result<i64, String>) {
-        let last_for_path = {
-            let mut inflight = self.xmp_inflight.borrow_mut();
-            let n = inflight.entry(path.clone()).or_insert(1);
-            *n -= 1;
-            let last = *n == 0;
-            if last {
-                inflight.remove(&path);
-            }
-            last
-        };
-        match result {
-            Ok(mtime) if last_for_path => {
-                let _ = self.index.borrow().mark_xmp_synced(&path, mtime);
-            }
-            Ok(_) => {}
-            Err(e) => {
-                eprintln!("XMP write failed for {}: {e}", path.display());
-                let _ = self.index.borrow().mark_xmp_dirty(&path);
-                self.report_xmp_failure();
-            }
+        let failed = apply_xmp_result(
+            &self.index.borrow(),
+            &mut self.xmp_inflight.borrow_mut(),
+            &path,
+            result,
+        );
+        if failed {
+            self.report_xmp_failure();
         }
     }
 
@@ -1668,6 +1663,53 @@ impl AppState {
         {
             eprintln!("XMP writer thread panicked");
         }
+        // The main loop stops after this, so results still queued would never mark their
+        // rows synced: they would stay dirty and, on the next launch, the old rating would
+        // be written over any edit made in another tool meanwhile. This runs on the main
+        // thread, so the message task cannot handle any of these concurrently.
+        while let Ok(msg) = self.msg_rx.try_recv() {
+            if let Msg::XmpWritten { path, result } = msg {
+                apply_xmp_result(
+                    &self.index.borrow(),
+                    &mut self.xmp_inflight.borrow_mut(),
+                    &path,
+                    result,
+                );
+            }
+        }
+    }
+}
+
+/// Records a finished sidecar write in the index. Only the last queued write for a path marks
+/// it synced, so an earlier write cannot hide a newer pending one; a failure leaves the row
+/// dirty for a retry. Returns true if the write failed.
+fn apply_xmp_result(
+    index: &Index,
+    inflight: &mut HashMap<PathBuf, u32>,
+    path: &std::path::Path,
+    result: Result<i64, String>,
+) -> bool {
+    let last_for_path = {
+        let n = inflight.entry(path.to_path_buf()).or_insert(1);
+        *n -= 1;
+        let last = *n == 0;
+        if last {
+            inflight.remove(path);
+        }
+        last
+    };
+    match result {
+        Ok(mtime) => {
+            if last_for_path {
+                let _ = index.mark_xmp_synced(path, mtime);
+            }
+            false
+        }
+        Err(e) => {
+            eprintln!("XMP write failed for {}: {e}", path.display());
+            let _ = index.mark_xmp_dirty(path);
+            true
+        }
     }
 }
 
@@ -1714,6 +1756,65 @@ mod tests {
 
     fn jobs(paths: Vec<&str>) -> Vec<(ItemId, Vec<PathBuf>)> {
         vec![(1, paths.into_iter().map(PathBuf::from).collect())]
+    }
+
+    fn rated(index: &Index, path: &str) {
+        let file = MediaFile {
+            path: PathBuf::from(path),
+            kind: crate::media::FileKind::Jpeg,
+            size: 10,
+            mtime_ns: 100,
+        };
+        index.set_rating(&file, 4, false).unwrap();
+    }
+
+    fn row(index: &Index, path: &str) -> FileRecord {
+        index.get(std::path::Path::new(path)).unwrap().unwrap()
+    }
+
+    #[test]
+    fn xmp_result_marks_row_synced() {
+        let index = Index::open_in_memory().unwrap();
+        rated(&index, "/p/a.jpg");
+        let mut inflight = HashMap::from([(PathBuf::from("/p/a.jpg"), 1)]);
+        let failed = apply_xmp_result(
+            &index,
+            &mut inflight,
+            std::path::Path::new("/p/a.jpg"),
+            Ok(777),
+        );
+        assert!(!failed);
+        let r = row(&index, "/p/a.jpg");
+        assert_eq!((r.xmp_dirty, r.xmp_synced_at), (false, Some(777)));
+        assert!(inflight.is_empty());
+    }
+
+    #[test]
+    fn only_the_last_queued_xmp_write_marks_synced() {
+        let index = Index::open_in_memory().unwrap();
+        rated(&index, "/p/a.jpg");
+        let path = std::path::Path::new("/p/a.jpg");
+        let mut inflight = HashMap::from([(path.to_path_buf(), 2)]);
+        apply_xmp_result(&index, &mut inflight, path, Ok(1));
+        assert!(
+            row(&index, "/p/a.jpg").xmp_dirty,
+            "a newer write is still queued"
+        );
+        apply_xmp_result(&index, &mut inflight, path, Ok(2));
+        let r = row(&index, "/p/a.jpg");
+        assert_eq!((r.xmp_dirty, r.xmp_synced_at), (false, Some(2)));
+    }
+
+    #[test]
+    fn failed_xmp_write_leaves_row_dirty() {
+        let index = Index::open_in_memory().unwrap();
+        rated(&index, "/p/a.jpg");
+        let path = std::path::Path::new("/p/a.jpg");
+        let mut inflight = HashMap::from([(path.to_path_buf(), 1)]);
+        let failed = apply_xmp_result(&index, &mut inflight, path, Err("disk full".into()));
+        assert!(failed);
+        assert!(row(&index, "/p/a.jpg").xmp_dirty);
+        assert!(inflight.is_empty());
     }
 
     #[test]
