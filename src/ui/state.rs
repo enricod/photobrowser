@@ -138,11 +138,13 @@ pub struct AppState {
     viewer_pos: Cell<Option<u32>>,
     /// A `sync_viewer` run is already queued for this burst of list changes.
     viewer_sync_queued: Cell<bool>,
-    /// Ids currently accepted into a move/copy batch (spawned or waiting on XMP writes to
-    /// drain): `rate()` and `start_transfer()` both skip them to avoid racing the transfer.
-    transferring: RefCell<HashSet<ItemId>>,
+    /// Items accepted into a move/copy batch (spawned or waiting on XMP writes to drain), by
+    /// their media paths: `rate()`, `start_transfer()`, `on_scanned()` and `flush_dirty_xmp()`
+    /// all leave those paths alone to avoid racing the transfer. Survives a folder change:
+    /// the transfers keep running, and a reopened folder's new objects match by path.
+    transferring: RefCell<InFlight>,
     /// Move/copy batches accepted and not yet finished (waiting on XMP writes or running),
-    /// and how many of their items are still to go. Unlike `transferring`, these survive
+    /// and how many of their items are still to go. Like `transferring`, these survive
     /// a folder change: they gate closing the window, which would kill the transfer thread.
     batches_active: Cell<usize>,
     transfer_items_left: Cell<usize>,
@@ -168,6 +170,31 @@ struct PendingBatch {
     dest: PathBuf,
     kind: OpKind,
     policy: ConflictPolicy,
+}
+
+/// Media paths of the items in running or pending move/copy batches, by item id.
+#[derive(Debug, Default)]
+struct InFlight {
+    by_id: HashMap<ItemId, Vec<PathBuf>>,
+}
+
+impl InFlight {
+    fn add(&mut self, id: ItemId, paths: Vec<PathBuf>) {
+        self.by_id.insert(id, paths);
+    }
+
+    /// Ends an item's part of its batch, whatever the outcome. Unknown ids are ignored.
+    fn finish(&mut self, id: ItemId) {
+        self.by_id.remove(&id);
+    }
+
+    fn paths(&self) -> HashSet<PathBuf> {
+        self.by_id.values().flatten().cloned().collect()
+    }
+
+    fn contains_any<'a>(&self, mut files: impl Iterator<Item = &'a std::path::Path>) -> bool {
+        files.any(|f| self.by_id.values().flatten().any(|p| p == f))
+    }
 }
 
 /// Marker `fileops` puts in a failure message when undoing a partial transfer failed.
@@ -479,10 +506,9 @@ impl AppState {
         }
         self.objects.borrow_mut().clear();
         self.filter_state.borrow_mut().pinned.clear();
-        // In-flight transfers (spawned, or still waiting on pending XMP writes) keep
-        // running: they operate on disk paths, independent of which folder is open here.
-        // Their ids are never reused, so it's enough to just forget them.
-        self.transferring.borrow_mut().clear();
+        // In-flight transfers (spawned, or still waiting on pending XMP writes) keep running
+        // on disk paths, independent of which folder is open: `transferring` is kept, so
+        // the guard still covers those paths when the folder is reopened.
         *self.folder.borrow_mut() = None;
         if let Some(monitor) = self.monitor.borrow_mut().take() {
             monitor.cancel();
@@ -514,15 +540,13 @@ impl AppState {
 
     /// Media paths of the items currently in a move/copy batch.
     fn transferring_paths(&self) -> HashSet<PathBuf> {
+        self.transferring.borrow().paths()
+    }
+
+    /// True if any file of `obj` is part of a running or pending move/copy.
+    fn is_transferring(&self, obj: &ItemObject) -> bool {
         let transferring = self.transferring.borrow();
-        let objects = self.objects.borrow();
-        transferring
-            .iter()
-            .filter_map(|id| objects.get(id))
-            .flat_map(|o| {
-                o.with_item(|i| i.files.iter().map(|f| f.path.clone()).collect::<Vec<_>>())
-            })
-            .collect()
+        obj.with_item(|i| transferring.contains_any(i.files.iter().map(|f| f.path.as_path())))
     }
 
     fn remove_object(&self, id: ItemId) {
@@ -1223,15 +1247,13 @@ impl AppState {
     }
 
     pub fn rate(self: &Rc<Self>, change: RatingChange) {
-        let targets: Vec<ItemObject> = {
-            let transferring = self.transferring.borrow();
-            // `objects` check: a stale object (e.g. one the viewer still holds after it left
-            // the folder) must never write a rating to its vacated path.
-            self.rating_targets()
-                .into_iter()
-                .filter(|o| !transferring.contains(&o.id()) && self.object(o.id()).is_some())
-                .collect()
-        };
+        // `objects` check: a stale object (e.g. one the viewer still holds after it left
+        // the folder) must never write a rating to its vacated path.
+        let targets: Vec<ItemObject> = self
+            .rating_targets()
+            .into_iter()
+            .filter(|o| !self.is_transferring(o) && self.object(o.id()).is_some())
+            .collect();
         if targets.is_empty() {
             return;
         }
@@ -1349,11 +1371,10 @@ impl AppState {
 
     pub fn start_transfer(self: &Rc<Self>, targets: Vec<ItemObject>, dest: PathBuf, kind: OpKind) {
         let (targets, dropped_transferring) = {
-            let transferring = self.transferring.borrow();
             let mut kept = Vec::with_capacity(targets.len());
             let mut dropped = false;
             for o in targets {
-                if transferring.contains(&o.id()) {
+                if self.is_transferring(&o) {
                     dropped = true;
                 } else {
                     kept.push(o);
@@ -1418,8 +1439,8 @@ impl AppState {
     ) {
         {
             let mut transferring = self.transferring.borrow_mut();
-            for (id, _) in &jobs {
-                transferring.insert(*id);
+            for (id, paths) in &jobs {
+                transferring.add(*id, paths.clone());
             }
         }
         self.batches_active.set(self.batches_active.get() + 1);
@@ -1535,7 +1556,7 @@ impl AppState {
 
     fn on_transferred(&self, id: ItemId, kind: OpKind, outcome: TransferOutcome) {
         // Every outcome (Done, Skipped, Failed) ends this item's part of the batch.
-        self.transferring.borrow_mut().remove(&id);
+        self.transferring.borrow_mut().finish(id);
         self.transfer_items_left
             .set(self.transfer_items_left.get().saturating_sub(1));
         let TransferOutcome::Done(pairs) = outcome else {
@@ -1870,6 +1891,33 @@ mod tests {
     #[test]
     fn viewer_closes_when_the_list_is_empty() {
         assert_eq!(viewer_fallback(false, Some(0), 0), ViewerFallback::Close);
+    }
+
+    #[test]
+    fn in_flight_paths_last_until_their_item_finishes() {
+        let p = |s: &str| PathBuf::from(s);
+        let mut t = InFlight::default();
+        t.add(1, vec![p("/a/IMG_1.CR3"), p("/a/IMG_1.JPG")]);
+        t.add(2, vec![p("/a/IMG_2.JPG")]);
+        assert_eq!(t.paths().len(), 3);
+        // A reopened folder gives the same file a new object: matching is by path.
+        assert!(t.contains_any([std::path::Path::new("/a/IMG_1.JPG")].into_iter()));
+        assert!(!t.contains_any([std::path::Path::new("/a/IMG_3.JPG")].into_iter()));
+        t.finish(1);
+        assert!(!t.contains_any([std::path::Path::new("/a/IMG_1.CR3")].into_iter()));
+        assert!(t.contains_any([std::path::Path::new("/a/IMG_2.JPG")].into_iter()));
+        assert_eq!(t.paths(), HashSet::from([p("/a/IMG_2.JPG")]));
+    }
+
+    #[test]
+    fn finishing_an_unknown_item_is_harmless() {
+        let mut t = InFlight::default();
+        t.add(7, vec![PathBuf::from("/a/x.jpg")]);
+        t.finish(99);
+        assert_eq!(t.paths().len(), 1);
+        t.finish(7);
+        t.finish(7);
+        assert!(t.paths().is_empty());
     }
 
     #[test]
