@@ -46,7 +46,7 @@ A `Makefile` wraps the common commands:
 | `make uninstall [PREFIX=dir]` | Remove what `make install` installed. |
 | `make clean` | `cargo clean`. |
 | `make flatpak` | Build the Flatpak and install it for the current user (see below). |
-| `make flatpak-bundle` | Build `photobrowser.flatpak`, a single file installable elsewhere. |
+| `make flatpak-bundle` | Build `photobrowser.flatpak`, a single file to install on another PC with `flatpak install --user photobrowser.flatpak` (the GNOME runtime is fetched from Flathub). |
 | `make flatpak-sources` | Regenerate `build-aux/flatpak/cargo-sources.json` after `Cargo.lock` changes. |
 
 `make install` puts the binary at `$(PREFIX)/bin/photobrowser` and the desktop

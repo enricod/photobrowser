@@ -107,4 +107,5 @@ flatpak:
 flatpak-bundle:
 	flatpak-builder --user --install-deps-from=flathub --force-clean \
 		--repo=repo-flatpak build-flatpak $(FLATPAK_MANIFEST)
-	flatpak build-bundle repo-flatpak photobrowser.flatpak $(APP_ID)
+	flatpak build-bundle --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo \
+		repo-flatpak photobrowser.flatpak $(APP_ID)
