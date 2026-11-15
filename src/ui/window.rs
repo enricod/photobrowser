@@ -9,7 +9,7 @@ use super::folderpanel::FolderPanel;
 use super::pathbar::PathBar;
 use super::state::{AppState, Widgets};
 use super::viewer::Viewer;
-use super::{dialogs, filterbar, grid, keys, prefs, style};
+use super::{dialogs, filterbar, grid, keys, openwith, prefs, style};
 use crate::fileops::OpKind;
 
 pub fn build(app: &adw::Application, start_folder: Option<PathBuf>) {
@@ -41,6 +41,9 @@ pub fn build(app: &adw::Application, start_folder: Option<PathBuf>) {
     file_ops.append(Some("Move to…"), Some("win.move"));
     file_ops.append(Some("Copy to…"), Some("win.copy"));
     file_ops.append(Some("Organize…"), Some("win.organize"));
+    // Relabelled with the favourite's name once the state exists (`refresh_open_menu`).
+    file_ops.append(Some("Open in Favourite App…"), Some("win.open-favourite"));
+    file_ops.append(Some("Open With…"), Some("win.open-with"));
     menu.append_section(None, &file_ops);
     let app_section = gio::Menu::new();
     app_section.append(Some("Keyboard Shortcuts"), Some("win.shortcuts"));
@@ -122,6 +125,7 @@ pub fn build(app: &adw::Application, start_folder: Option<PathBuf>) {
         path_bar: path_bar.clone(),
         folder_panel,
         folder_split: folder_split.clone(),
+        file_menu: file_ops.clone(),
     });
 
     path_bar
@@ -172,18 +176,43 @@ pub fn build(app: &adw::Application, start_folder: Option<PathBuf>) {
     let about = gio::ActionEntry::builder("about")
         .activate(move |_: &adw::ApplicationWindow, _, _| dialogs::about(&s))
         .build();
-    window.add_action_entries([preferences, move_to, copy_to, organize, shortcuts, about]);
+    let s = state.clone();
+    let open_favourite = gio::ActionEntry::builder("open-favourite")
+        .activate(move |_: &adw::ApplicationWindow, _, _| openwith::open_in_favourite(&s))
+        .build();
+    let s = state.clone();
+    let open_with = gio::ActionEntry::builder("open-with")
+        .activate(move |_: &adw::ApplicationWindow, _, _| openwith::open_with(&s))
+        .build();
+    window.add_action_entries([
+        preferences,
+        move_to,
+        copy_to,
+        organize,
+        shortcuts,
+        about,
+        open_favourite,
+        open_with,
+    ]);
+    state.refresh_open_menu();
     // Move/Copy/Organize act on what M and C act on: the grid selection, or the photo
     // shown in the viewer. Enabled only when there is one.
     let update_actions = {
         let (s, w) = (state.clone(), window.downgrade());
         move || {
             let Some(w) = w.upgrade() else { return };
-            let enabled = !s.rating_targets().is_empty();
-            for name in ["move", "copy", "organize"] {
+            let targets = s.rating_targets().len();
+            let enable = |name: &str, on: bool| {
                 if let Some(action) = w.lookup_action(name).and_downcast::<gio::SimpleAction>() {
-                    action.set_enabled(enabled);
+                    action.set_enabled(on);
                 }
+            };
+            for name in ["move", "copy", "organize"] {
+                enable(name, targets > 0);
+            }
+            // Another program gets one photo at a time.
+            for name in ["open-favourite", "open-with"] {
+                enable(name, targets == 1);
             }
         }
     };

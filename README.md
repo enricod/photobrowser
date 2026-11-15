@@ -83,6 +83,8 @@ separate from a `make install` build.
 | `X` | Toggle reject |
 | `M` / `C` | Move / copy to folder… |
 | `Ctrl+Shift+M` | Move to the last destination |
+| `E` | Open in the favourite program (asks the first time) |
+| `Shift+E` | Open with… (choose a program) |
 | `Ctrl+F` | Focus the filter bar |
 | `Ctrl+A` | Select all visible photos (grid) |
 | `Ctrl+?` | Keyboard shortcuts (also in the main menu) |
@@ -98,6 +100,9 @@ Ratings apply to the selection in the grid and to the current image in the full 
 
 The main menu (top-right of the header bar) has **Move to…**, **Copy to…** and
 **Organize…** (sort the selection into `YYYY/YYYY-MM-DD` folders by shot date),
+**Open in ‹favourite›** / **Open With…** (hand the photo, its RAW if it has one, to
+another program such as RawTherapee; "Remember as favourite" makes `E` open it there
+directly — in the Flatpak, the system's chooser and default app are used instead),
 **Keyboard Shortcuts**, a **Preferences** dialog for auto-advance after rating
 and the in-memory/disk cache sizes, and **About Photobrowser**.
 

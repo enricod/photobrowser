@@ -41,6 +41,8 @@ pub const SHORTCUTS: &[ShortcutSection] = &[
             ("Move to folder…", "m"),
             ("Copy to folder…", "c"),
             ("Move to the last destination", "<Control><Shift>m"),
+            ("Open in the favourite program", "e"),
+            ("Open with…", "<Shift>e"),
         ],
     },
     ShortcutSection {
@@ -113,6 +115,8 @@ fn handle_common(
         (false, Some('x')) => state.rate(RatingChange::ToggleReject),
         (false, Some('m')) => dialogs::choose_destination(state, OpKind::Move),
         (false, Some('c')) => dialogs::choose_destination(state, OpKind::Copy),
+        (false, Some('e')) if shift => super::openwith::open_with(state),
+        (false, Some('e')) => super::openwith::open_in_favourite(state),
         (false, Some('+' | '=')) if !state.viewer_active() => state.zoom_thumbs(1),
         (false, Some('-')) if !state.viewer_active() => state.zoom_thumbs(-1),
         _ => return glib::Propagation::Proceed,

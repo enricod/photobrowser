@@ -14,6 +14,8 @@ pub struct Config {
     pub thumb_display_size: i32,
     /// Show the open folder's subfolders above the grid.
     pub show_folders: bool,
+    /// Desktop ID of the favourite "Open With" program (native builds; `E`).
+    pub open_with_app: Option<String>,
     /// Left out when saving if it is not valid UTF-8 (TOML strings must be), so it cannot
     /// make every save fail.
     #[serde(serialize_with = "utf8_path_or_none")]
@@ -36,6 +38,7 @@ impl Default for Config {
             disk_cache_mb: 2048,
             thumb_display_size: 192,
             show_folders: false,
+            open_with_app: None,
             last_folder: None,
         }
     }
@@ -286,6 +289,20 @@ mod tests {
         };
         cfg.save_to(&path).unwrap();
         assert!(Config::load_from(&path).show_folders);
+    }
+
+    #[test]
+    fn favourite_program_roundtrips_and_defaults_to_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "auto_advance = true\n").unwrap();
+        assert_eq!(Config::load_from(&path).open_with_app, None);
+        let cfg = Config {
+            open_with_app: Some("com.rawtherapee.RawTherapee.desktop".into()),
+            ..Default::default()
+        };
+        cfg.save_to(&path).unwrap();
+        assert_eq!(Config::load_from(&path), cfg);
     }
 
     #[test]
