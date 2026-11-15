@@ -93,7 +93,12 @@ pub struct Widgets {
     pub folder_panel: FolderPanel,
     /// The grid page: photos, with the folder panel on the right.
     pub folder_split: adw::OverlaySplitView,
+    /// Main-menu section: Move, Copy, Organize, Open in ‹favourite›, Open With…
+    pub file_menu: gio::Menu,
 }
+
+/// Position of "Open in ‹favourite›" in `Widgets::file_menu`.
+pub const OPEN_FAVOURITE_MENU_POS: i32 = 3;
 
 pub struct AppState {
     pub config: RefCell<Config>,
@@ -1015,6 +1020,24 @@ impl AppState {
         self.config.borrow_mut().show_folders = on;
         self.schedule_config_save();
         self.refresh_folder_panel();
+    }
+
+    /// Remembers (or forgets) the favourite "Open With" program and relabels its menu entry.
+    pub fn set_open_with_app(self: &Rc<Self>, app_id: Option<String>) {
+        self.config.borrow_mut().open_with_app = app_id;
+        self.schedule_config_save();
+        self.refresh_open_menu();
+    }
+
+    /// Shows the favourite program's name in the "Open in …" menu entry.
+    pub fn refresh_open_menu(&self) {
+        let menu = &self.widgets().file_menu;
+        menu.remove(OPEN_FAVOURITE_MENU_POS);
+        menu.insert(
+            OPEN_FAVOURITE_MENU_POS,
+            Some(&super::openwith::favourite_label(self)),
+            Some("win.open-favourite"),
+        );
     }
 
     pub fn focus_filters(&self) {

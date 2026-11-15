@@ -4,6 +4,7 @@ pub mod folderpanel;
 pub mod grid;
 pub mod item_object;
 pub mod keys;
+pub mod openwith;
 pub mod pathbar;
 pub mod prefs;
 pub mod state;
