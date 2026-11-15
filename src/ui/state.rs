@@ -12,7 +12,7 @@ use adw::prelude::*;
 use gtk::{gdk, gio, glib};
 use lru::LruCache;
 
-use super::folderstrip::FolderStrip;
+use super::folderpanel::FolderPanel;
 use super::item_object::ItemObject;
 use super::pathbar::{PathBar, display_dir};
 use super::viewer::{Viewer, info_text};
@@ -90,13 +90,15 @@ pub struct Widgets {
     pub filters: gtk::Box,
     pub viewer: Rc<Viewer>,
     pub path_bar: PathBar,
-    pub folder_strip: FolderStrip,
+    pub folder_panel: FolderPanel,
+    /// The grid page: photos, with the folder panel on the right.
+    pub folder_split: adw::OverlaySplitView,
 }
 
 pub struct AppState {
     pub config: RefCell<Config>,
     pub index: RefCell<Index>,
-    /// The open folder's subfolders, from its last scan (see `refresh_folder_strip`).
+    /// The open folder's subfolders, from its last scan (see `refresh_folder_panel`).
     subfolders: RefCell<Vec<PathBuf>>,
     /// Why the on-disk index could not be opened, if the app fell back to an in-memory one.
     index_unavailable: Option<String>,
@@ -544,8 +546,9 @@ impl AppState {
             .window
             .set_title(Some(&format!("{name} — Photobrowser")));
         self.widgets().path_bar.set_folder(Some(&folder));
-        // Subfolders follow with the scan.
-        self.refresh_folder_strip();
+        // Subfolders follow with the scan; a filter typed for the previous folder goes.
+        self.widgets().folder_panel.clear_filter();
+        self.refresh_folder_panel();
 
         let known = self.index.borrow().load_folder(&folder).unwrap_or_default();
         let mut items = sync::items_from_records(&known);
@@ -602,7 +605,7 @@ impl AppState {
         self.widgets().stack.set_visible_child_name("empty");
         self.widgets().window.set_title(Some("Photobrowser"));
         self.widgets().path_bar.set_folder(None);
-        self.refresh_folder_strip();
+        self.refresh_folder_panel();
         self.toast(message);
     }
 
@@ -677,7 +680,7 @@ impl AppState {
             }
         };
         *self.subfolders.borrow_mut() = std::mem::take(&mut scan.folders);
-        self.refresh_folder_strip();
+        self.refresh_folder_panel();
         // A file being moved away right now is "missing" to the scan, but its row is still
         // needed: `on_transferred` re-keys it to the destination.
         let moving = self.transferring_paths();
@@ -988,12 +991,13 @@ impl AppState {
         self.selection.select_all();
     }
 
-    /// Shows or hides the subfolder strip for the open folder, per the "Show folders" box.
-    pub fn refresh_folder_strip(&self) {
-        self.widgets().folder_strip.show(
-            &self.subfolders.borrow(),
-            self.config.borrow().show_folders && self.folder().is_some(),
-        );
+    /// Fills the folder panel with the open folder's subfolders and shows or hides it, per
+    /// the "Show folders" box.
+    pub fn refresh_folder_panel(&self) {
+        let w = self.widgets();
+        w.folder_panel.set_folders(&self.subfolders.borrow());
+        w.folder_split
+            .set_show_sidebar(self.config.borrow().show_folders && self.folder().is_some());
     }
 
     /// Opens the parent of the open folder (path bar ↑, Alt+↑).
@@ -1003,14 +1007,14 @@ impl AppState {
         }
     }
 
-    /// The "Show folders" box changed: remember it and update the strip.
+    /// The "Show folders" box changed: remember it and show or hide the panel.
     pub fn set_show_folders(self: &Rc<Self>, on: bool) {
         if self.config.borrow().show_folders == on {
             return;
         }
         self.config.borrow_mut().show_folders = on;
         self.schedule_config_save();
-        self.refresh_folder_strip();
+        self.refresh_folder_panel();
     }
 
     pub fn focus_filters(&self) {

@@ -5,7 +5,7 @@ use adw::prelude::*;
 use gtk::gio;
 use gtk::glib;
 
-use super::folderstrip::FolderStrip;
+use super::folderpanel::FolderPanel;
 use super::pathbar::PathBar;
 use super::state::{AppState, Widgets};
 use super::viewer::Viewer;
@@ -21,6 +21,9 @@ pub fn build(app: &adw::Application, start_folder: Option<PathBuf>) {
         .title("Photobrowser")
         .default_width(1400)
         .default_height(900)
+        // Required with breakpoints; GNOME's minimum window size.
+        .width_request(360)
+        .height_request(294)
         .build();
 
     let header = adw::HeaderBar::new();
@@ -77,14 +80,26 @@ pub fn build(app: &adw::Application, start_folder: Option<PathBuf>) {
     stack.add_named(&empty, Some("empty"));
     // Opening a folder rebuilds the strip: do it after the activation signal has returned.
     let s = state.clone();
-    let folder_strip = FolderStrip::new(move |folder| {
+    let folder_panel = FolderPanel::new(move |folder| {
         let s = s.clone();
         glib::idle_add_local_once(move || s.open_folder(folder));
     });
-    let grid_page = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    grid_page.append(&folder_strip.root);
-    grid_page.append(&grid_scroller);
-    stack.add_named(&grid_page, Some("grid"));
+    // The folder panel sits on the right, under the path bar's "Show folders" box. On a
+    // narrow window it overlays the grid instead of squeezing it.
+    let folder_split = adw::OverlaySplitView::builder()
+        .content(&grid_scroller)
+        .sidebar(&folder_panel.root)
+        .sidebar_position(gtk::PackType::End)
+        .min_sidebar_width(200.0)
+        .max_sidebar_width(320.0)
+        .show_sidebar(false)
+        .build();
+    stack.add_named(&folder_split, Some("grid"));
+    let narrow = adw::Breakpoint::new(
+        adw::BreakpointCondition::parse("max-width: 700sp").expect("valid breakpoint"),
+    );
+    narrow.add_setter(&folder_split, "collapsed", Some(&true.to_value()));
+    window.add_breakpoint(narrow);
     let viewer = Viewer::new(&state);
     stack.add_named(&viewer.root, Some("viewer"));
     let toasts = adw::ToastOverlay::new();
@@ -105,7 +120,8 @@ pub fn build(app: &adw::Application, start_folder: Option<PathBuf>) {
         filters,
         viewer,
         path_bar: path_bar.clone(),
-        folder_strip,
+        folder_panel,
+        folder_split: folder_split.clone(),
     });
 
     path_bar
@@ -117,6 +133,13 @@ pub fn build(app: &adw::Application, start_folder: Option<PathBuf>) {
         .connect_toggled(move |b| s.set_show_folders(b.is_active()));
     let s = state.clone();
     path_bar.up.connect_clicked(move |_| s.open_parent());
+    // Dismissing the overlaid panel on a narrow window unticks the box, so the two agree.
+    let check = path_bar.show_folders.clone();
+    folder_split.connect_show_sidebar_notify(move |split| {
+        if !split.shows_sidebar() && check.is_active() && split.is_collapsed() {
+            check.set_active(false);
+        }
+    });
 
     let s = state.clone();
     window.connect_close_request(move |_| s.close_requested());

@@ -67,6 +67,11 @@ pub fn handle(state: &Rc<AppState>, key: gdk::Key, mods: gdk::ModifierType) -> g
     if state.widgets().window.visible_dialog().is_some() {
         return glib::Propagation::Proceed;
     }
+    // Typing in a text field (the folder filter, …) must not trigger shortcuts: "2024-05"
+    // would otherwise set ratings.
+    if GtkWindowExt::focus(&state.widgets().window).is_some_and(|w| w.is::<gtk::Editable>()) {
+        return glib::Propagation::Proceed;
+    }
     if key == gdk::Key::Up && mods.contains(gdk::ModifierType::ALT_MASK) {
         state.open_parent();
         return glib::Propagation::Stop;

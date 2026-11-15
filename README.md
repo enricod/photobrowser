@@ -82,8 +82,9 @@ The main menu (top-right of the header bar) has **Move to…**, **Copy to…** a
 and the in-memory/disk cache sizes, and **About Photobrowser**.
 
 The bar under the header shows the open folder, with a ↑ button to open its
-parent. Tick **Show folders** there to list its subfolders above the grid:
-click one to open it.
+parent. Tick **Show folders** there to open a panel on the right listing its
+subfolders: type in its filter box to narrow the list (Enter opens the first
+match), and click a folder to open it.
 
 ## Where things are stored
 
