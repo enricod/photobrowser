@@ -317,13 +317,25 @@ pub struct XmpJob {
 fn spawn_xmp_writer(
     tx: async_channel::Sender<Msg>,
 ) -> (mpsc::Sender<XmpJob>, std::thread::JoinHandle<()>) {
+    spawn_xmp_writer_with(tx, |job| {
+        xmp::write_rating(&job.path, job.rating, job.rejected).map_err(|e| e.to_string())
+    })
+}
+
+/// The writer loop, with the per-file write as a parameter (tests pass their own). A panic
+/// while writing one sidecar (e.g. inside the exiv2 bindings) becomes an error result for
+/// that file: the thread lives on, so later ratings still reach their sidecars.
+fn spawn_xmp_writer_with(
+    tx: async_channel::Sender<Msg>,
+    write: impl Fn(&XmpJob) -> Result<i64, String> + Send + 'static,
+) -> (mpsc::Sender<XmpJob>, std::thread::JoinHandle<()>) {
     let (job_tx, job_rx) = mpsc::channel::<XmpJob>();
     let handle = std::thread::Builder::new()
         .name("pb-xmp".into())
         .spawn(move || {
             for job in job_rx {
-                let result = xmp::write_rating(&job.path, job.rating, job.rejected)
-                    .map_err(|e| e.to_string());
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| write(&job)))
+                    .unwrap_or_else(|_| Err("internal error while writing the sidecar".into()));
                 if tx
                     .send_blocking(Msg::XmpWritten {
                         path: job.path,
@@ -1470,19 +1482,56 @@ impl AppState {
     }
 
     fn write_xmp(&self, path: PathBuf, rating: u8, rejected: bool) {
-        let tx = self.xmp_tx.borrow();
         // Shutting down: the index row stays dirty and the next launch writes it.
-        let Some(tx) = tx.as_ref() else { return };
+        if self.xmp_tx.borrow().is_none() {
+            return;
+        }
         *self
             .xmp_inflight
             .borrow_mut()
             .entry(path.clone())
             .or_insert(0) += 1;
-        let _ = tx.send(XmpJob {
+        let job = XmpJob {
             path,
             rating,
             rejected,
-        });
+        };
+        let Err(job) = self.send_xmp_job(job) else {
+            return;
+        };
+        // The writer thread is gone. Start a new one rather than silently dropping this and
+        // every later sidecar write.
+        eprintln!("XMP writer thread stopped; restarting it");
+        let (tx, handle) = spawn_xmp_writer(self.tx.clone());
+        *self.xmp_tx.borrow_mut() = Some(tx);
+        *self.xmp_writer.borrow_mut() = Some(handle);
+        let Err(job) = self.send_xmp_job(job) else {
+            return;
+        };
+        // Still no writer: undo the pending count (or moves of this photo would wait for
+        // it forever), keep the row dirty for a later retry, and say so.
+        {
+            let mut inflight = self.xmp_inflight.borrow_mut();
+            if let Some(n) = inflight.get_mut(&job.path) {
+                *n -= 1;
+                if *n == 0 {
+                    inflight.remove(&job.path);
+                }
+            }
+        }
+        let _ = self.index.borrow().mark_xmp_dirty(&job.path);
+        self.toast(&format!(
+            "Couldn't write XMP for {}",
+            job.path.file_name().unwrap_or_default().to_string_lossy()
+        ));
+    }
+
+    /// Queues a sidecar write; gives the job back if there is no writer to take it.
+    fn send_xmp_job(&self, job: XmpJob) -> Result<(), XmpJob> {
+        match self.xmp_tx.borrow().as_ref() {
+            Some(tx) => tx.send(job).map_err(|e| e.0),
+            None => Err(job),
+        }
     }
 
     fn on_xmp_written(self: &Rc<Self>, path: PathBuf, result: Result<i64, String>) {
@@ -2196,6 +2245,63 @@ mod tests {
             c.finished_text(1, 2),
             "Copied 1 item into dated folders under /srv/photos, 2 skipped"
         );
+    }
+
+    fn job(path: &str, rating: u8) -> XmpJob {
+        XmpJob {
+            path: PathBuf::from(path),
+            rating,
+            rejected: false,
+        }
+    }
+
+    fn next_result(rx: &async_channel::Receiver<Msg>) -> (PathBuf, Result<i64, String>) {
+        match rx.recv_blocking().expect("writer reports every job") {
+            Msg::XmpWritten { path, result } => (path, result),
+            _ => panic!("unexpected message"),
+        }
+    }
+
+    #[test]
+    fn xmp_writer_survives_a_panicking_write() {
+        let (tx, rx) = async_channel::unbounded();
+        let (jobs, handle) = spawn_xmp_writer_with(tx, |job| {
+            if job.rating == 9 {
+                panic!("exiv2 blew up");
+            }
+            Ok(i64::from(job.rating))
+        });
+        jobs.send(job("/p/bad.jpg", 9)).unwrap();
+        jobs.send(job("/p/good.jpg", 3)).unwrap();
+        let (path, result) = next_result(&rx);
+        assert_eq!(path, PathBuf::from("/p/bad.jpg"));
+        assert!(result.unwrap_err().contains("internal error"));
+        assert_eq!(next_result(&rx), (PathBuf::from("/p/good.jpg"), Ok(3)));
+        drop(jobs);
+        handle.join().expect("the writer thread did not die");
+    }
+
+    #[test]
+    fn xmp_writer_reports_results_in_order() {
+        let (tx, rx) = async_channel::unbounded();
+        let (jobs, handle) = spawn_xmp_writer_with(tx, |job| {
+            if job.rating == 0 {
+                Err("disk full".into())
+            } else {
+                Ok(1)
+            }
+        });
+        for (p, r) in [("/p/a.jpg", 2), ("/p/b.jpg", 0), ("/p/c.jpg", 5)] {
+            jobs.send(job(p, r)).unwrap();
+        }
+        assert_eq!(next_result(&rx), (PathBuf::from("/p/a.jpg"), Ok(1)));
+        assert_eq!(
+            next_result(&rx),
+            (PathBuf::from("/p/b.jpg"), Err("disk full".into()))
+        );
+        assert_eq!(next_result(&rx), (PathBuf::from("/p/c.jpg"), Ok(1)));
+        drop(jobs);
+        handle.join().unwrap();
     }
 
     #[test]
