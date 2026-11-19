@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::path::Path;
 use std::sync::{Once, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
@@ -110,8 +111,31 @@ pub fn orientation(meta: &Metadata) -> u8 {
     }
 }
 
+/// How much of a file `capture_time` reads first. The date sits near the start of JPEG,
+/// CR2/CR3, ORF, NEF, ARW, HEIC and most other camera files, while opening the whole file
+/// makes exiv2 read far more of it: on an SMB share via GVFS, ~0.08 s instead of ~0.5 s
+/// per photo. Large enough for a JPEG's whole EXIF segment (up to 64 KB) after its JFIF
+/// header; a smaller prefix would cut that segment off and pay for a second, full read.
+const CAPTURE_TIME_PREFIX: u64 = 128 * 1024;
+
 pub fn capture_time(path: &Path) -> Option<i64> {
-    let meta = open_path(path).ok()?;
+    let mut head = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(CAPTURE_TIME_PREFIX)
+        .read_to_end(&mut head)
+        .ok()?;
+    if let Some(t) = open_buffer(&head).ok().and_then(|m| date_of(&m)) {
+        return Some(t);
+    }
+    if (head.len() as u64) < CAPTURE_TIME_PREFIX {
+        return None; // that was the whole file
+    }
+    // Metadata further in (e.g. a PNG's eXIf chunk after the image data).
+    date_of(&open_path(path).ok()?)
+}
+
+fn date_of(meta: &Metadata) -> Option<i64> {
     ["Exif.Photo.DateTimeOriginal", "Exif.Image.DateTime"]
         .iter()
         .find_map(|tag| {
@@ -194,6 +218,49 @@ fn trim_float(v: f64) -> String {
 mod tests {
     use super::*;
     use crate::testutil::{set_exif, write_jpeg};
+
+    #[test]
+    fn capture_time_of_file_larger_than_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("big.jpg");
+        write_jpeg(&p, 8, 8, [1, 2, 3]);
+        set_exif(&p, "Exif.Photo.DateTimeOriginal", "2026:09:01 10:15:30");
+        // Trailing data after the image, as in a file with a large embedded preview.
+        let mut bytes = std::fs::read(&p).unwrap();
+        bytes.extend(std::iter::repeat_n(0u8, 2 * CAPTURE_TIME_PREFIX as usize));
+        std::fs::write(&p, bytes).unwrap();
+        assert_eq!(capture_time(&p), Some(1_788_257_730));
+    }
+
+    #[test]
+    fn capture_time_beyond_prefix_falls_back_to_whole_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("late.jpg");
+        write_jpeg(&p, 8, 8, [1, 2, 3]);
+        set_exif(&p, "Exif.Photo.DateTimeOriginal", "2026:09:01 10:15:30");
+        // Push the EXIF segment past the prefix with application segments right after SOI.
+        let bytes = std::fs::read(&p).unwrap();
+        let mut out = bytes[..2].to_vec();
+        let payload = 65_000usize;
+        let segments = CAPTURE_TIME_PREFIX as usize / payload + 1;
+        for _ in 0..segments {
+            out.extend([0xFF, 0xEF]);
+            out.extend(((payload + 2) as u16).to_be_bytes());
+            out.extend(std::iter::repeat_n(0u8, payload));
+        }
+        out.extend(&bytes[2..]);
+        std::fs::write(&p, out).unwrap();
+        assert_eq!(capture_time(&p), Some(1_788_257_730));
+    }
+
+    #[test]
+    fn capture_time_without_exif_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("plain.jpg");
+        write_jpeg(&p, 8, 8, [1, 2, 3]);
+        assert_eq!(capture_time(&p), None);
+        assert_eq!(capture_time(&dir.path().join("missing.jpg")), None);
+    }
 
     #[test]
     fn parses_exif_datetime() {

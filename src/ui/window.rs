@@ -89,8 +89,27 @@ pub fn build(app: &adw::Application, start_folder: Option<PathBuf>) {
     });
     // The folder panel sits on the right, under the path bar's "Show folders" box. On a
     // narrow window it overlays the grid instead of squeezing it.
+    // Shown over the empty grid until a slow folder (a network share) has been listed.
+    let loading = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(12)
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::Center)
+        .visible(false)
+        .can_target(false)
+        .build();
+    let loading_spinner = adw::Spinner::new();
+    loading_spinner.set_size_request(32, 32);
+    loading.append(&loading_spinner);
+    let loading_label = gtk::Label::new(Some("Loading folder…"));
+    loading_label.add_css_class("title-4");
+    loading_label.add_css_class("dim-label");
+    loading.append(&loading_label);
+    let grid_overlay = gtk::Overlay::new();
+    grid_overlay.set_child(Some(&grid_scroller));
+    grid_overlay.add_overlay(&loading);
     let folder_split = adw::OverlaySplitView::builder()
-        .content(&grid_scroller)
+        .content(&grid_overlay)
         .sidebar(&folder_panel.root)
         .sidebar_position(gtk::PackType::End)
         .min_sidebar_width(200.0)
@@ -125,6 +144,7 @@ pub fn build(app: &adw::Application, start_folder: Option<PathBuf>) {
         path_bar: path_bar.clone(),
         folder_panel,
         folder_split: folder_split.clone(),
+        loading,
         file_menu: file_ops.clone(),
     });
 

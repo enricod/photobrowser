@@ -181,6 +181,8 @@ pub struct PathBar {
     pub up: gtk::Button,
     /// "Show folders": the subfolder strip above the grid.
     pub show_folders: gtk::CheckButton,
+    /// "Scanning…" with a spinner, while the folder is being read.
+    scanning: gtk::Box,
     /// The open folder's path, refitted to the label whenever its width changes.
     shown: Rc<RefCell<Option<DisplayPath>>>,
     /// Takes the label's place in the layout and reports its width.
@@ -229,12 +231,25 @@ impl PathBar {
             .valign(gtk::Align::Center)
             .build();
         show_folders.add_css_class("caption");
+        let scanning = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(6)
+            .visible(false)
+            .tooltip_text("Reading the folder's photos")
+            .build();
+        scanning.append(&adw::Spinner::new());
+        let scanning_label = gtk::Label::new(Some("Scanning…"));
+        scanning_label.add_css_class("caption");
+        scanning_label.add_css_class("dim-label");
+        scanning.append(&scanning_label);
+        root.append(&scanning);
         root.append(&show_folders);
         let bar = PathBar {
             root,
             label,
             up,
             show_folders,
+            scanning,
             shown: Rc::default(),
             sizer,
         };
@@ -282,6 +297,12 @@ impl PathBar {
         if self.label.label() != text {
             self.label.set_label(&text);
         }
+    }
+}
+
+impl PathBar {
+    pub fn set_scanning(&self, on: bool) {
+        self.scanning.set_visible(on);
     }
 }
 
