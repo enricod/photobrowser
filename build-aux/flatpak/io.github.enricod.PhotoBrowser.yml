@@ -16,10 +16,13 @@ finish-args:
   # Photobrowser moves and copies photos, writes XMP sidecars next to them, watches and
   # rescans the open folder and reopens it at the next launch. Portal-granted access to a
   # single chosen folder cannot support that, so it needs lasting access to where photos
-  # live: the home folder and removable media (cards, USB drives).
+  # live: the home folder, removable media (cards, USB drives) and network shares
+  # mounted by GVFS (SMB/NFS/etc. appear as FUSE paths under $XDG_RUNTIME_DIR/gvfs).
   - --filesystem=home
   - --filesystem=/media
   - --filesystem=/run/media
+  - --filesystem=xdg-run/gvfs
+  - --talk-name=org.gtk.vfs.*
 
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/llvm23/bin

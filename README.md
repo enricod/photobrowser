@@ -68,8 +68,10 @@ with `flatpak run io.github.enricod.PhotoBrowser`.
 Crates are vendored from `build-aux/flatpak/cargo-sources.json` (the build has
 no network): run `make flatpak-sources` whenever `Cargo.lock` changes.
 
-The sandbox has access to the home folder and removable media (`/media`,
-`/run/media`), since the app moves files and writes sidecars next to photos. Its
+The sandbox has access to the home folder, removable media (`/media`,
+`/run/media`) and network shares mounted through GVFS (e.g. SMB shares opened in
+Files, under `/run/user/$UID/gvfs`), since the app moves files and writes
+sidecars next to photos. Its
 settings, index and thumbnail cache live in `~/.var/app/io.github.enricod.PhotoBrowser/`,
 separate from a `make install` build.
 
