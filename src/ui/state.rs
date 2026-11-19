@@ -18,7 +18,7 @@ use super::pathbar::{PathBar, display_dir};
 use super::viewer::{Viewer, info_text};
 use crate::catalog::diff::diff_items;
 use crate::catalog::rating::{self, RatingChange};
-use crate::catalog::sync::{self, ScanResult};
+use crate::catalog::sync::{self, Listed, ScanResult};
 use crate::config::Config;
 use crate::decode::{self, Quality, Rgba, THUMB_EDGE};
 use crate::exif::{self, ExifInfo};
@@ -45,6 +45,11 @@ pub enum Msg {
         generation: u64,
         serial: u64,
         result: Result<Rgba, String>,
+    },
+    /// The scan listed the folder and is now reading dates and sidecars.
+    Listed {
+        generation: u64,
+        listed: Listed,
     },
     Scanned {
         generation: u64,
@@ -93,6 +98,8 @@ pub struct Widgets {
     pub folder_panel: FolderPanel,
     /// The grid page: photos, with the folder panel on the right.
     pub folder_split: adw::OverlaySplitView,
+    /// "Loading folder…" over the grid while it is empty and the folder is being read.
+    pub loading: gtk::Box,
     /// Main-menu section: Move, Copy, Organize, Open in ‹favourite›, Open With…
     pub file_menu: gio::Menu,
 }
@@ -497,6 +504,7 @@ impl AppState {
                 serial,
                 result,
             } => self.on_thumb(id, generation, serial, result),
+            Msg::Listed { generation, listed } => self.on_listed(generation, listed),
             Msg::Scanned { generation, result } => self.on_scanned(generation, result),
             Msg::XmpWritten { path, result } => self.on_xmp_written(path, result),
             Msg::Full {
@@ -614,7 +622,7 @@ impl AppState {
             source.remove();
         }
         self.rescan_pending.set(false);
-        self.scan_running.set(false);
+        self.set_scan_running(false);
     }
 
     pub fn folder_lost(self: &Rc<Self>, message: &str) {
@@ -635,6 +643,7 @@ impl AppState {
             }
         }
         self.store.extend_from_slice(&objs);
+        self.refresh_loading();
     }
 
     /// Media paths of the items currently in a move/copy batch.
@@ -660,13 +669,16 @@ impl AppState {
     }
 
     fn start_scan(&self, folder: PathBuf, known: HashMap<PathBuf, FileRecord>) {
-        self.scan_running.set(true);
+        self.set_scan_running(true);
         let tx = self.tx.clone();
         let generation = self.generation.get();
         std::thread::Builder::new()
             .name("pb-scan".into())
             .spawn(move || {
-                let result = sync::scan_folder(&folder, &known).map_err(|e| e.to_string());
+                let result = sync::scan_folder_with(&folder, &known, |listed| {
+                    let _ = tx.send_blocking(Msg::Listed { generation, listed });
+                })
+                .map_err(|e| e.to_string());
                 let _ = tx.send_blocking(Msg::Scanned { generation, result });
             })
             .expect("failed to spawn scan thread");
@@ -684,11 +696,66 @@ impl AppState {
         self.start_scan(folder, known);
     }
 
+    fn set_scan_running(&self, on: bool) {
+        self.scan_running.set(on);
+        if let Some(w) = self.widgets.get() {
+            w.path_bar.set_scanning(on);
+        }
+        self.refresh_loading();
+    }
+
+    /// "Loading folder…" shows only while nothing is there to look at yet.
+    fn refresh_loading(&self) {
+        if let Some(w) = self.widgets.get() {
+            w.loading
+                .set_visible(self.scan_running.get() && self.objects.borrow().is_empty());
+        }
+    }
+
+    /// The folder's listing, ahead of the scan's result: shows new files and subfolders now.
+    /// Only additions are applied. Removals, rating and date changes, and pairs whose
+    /// partner is already shown wait for `on_scanned`, which owns the index.
+    fn on_listed(self: &Rc<Self>, generation: u64, listed: Listed) {
+        if generation != self.generation.get() {
+            return;
+        }
+        *self.subfolders.borrow_mut() = listed.folders;
+        self.refresh_folder_panel();
+        let shown: HashSet<PathBuf> = self
+            .objects
+            .borrow()
+            .values()
+            .flat_map(|o| {
+                o.with_item(|i| i.files.iter().map(|f| f.path.clone()).collect::<Vec<_>>())
+            })
+            .collect();
+        let added: Vec<Item> = listed
+            .items
+            .into_iter()
+            .filter(|i| i.files.iter().all(|f| !shown.contains(&f.path)))
+            .map(|mut i| {
+                i.id = self.alloc_id();
+                i
+            })
+            .collect();
+        if added.is_empty() {
+            return;
+        }
+        // A rescan's `on_scanned` warms only what it adds itself; these are added now.
+        // On the first scan it warms everything shown, these included.
+        if self.first_scan_done.get() {
+            self.warm_disk_cache(added.iter().map(|i| i.display_file().clone()).collect());
+        }
+        self.add_objects(added);
+        self.refilter();
+        self.resort();
+    }
+
     fn on_scanned(self: &Rc<Self>, generation: u64, result: Result<ScanResult, String>) {
         if generation != self.generation.get() {
             return;
         }
-        self.scan_running.set(false);
+        self.set_scan_running(false);
         let mut scan = match result {
             Ok(scan) => scan,
             Err(e) => {

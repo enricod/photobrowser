@@ -74,6 +74,10 @@ CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 const COLUMNS: &str =
     "path, size, mtime_ns, capture_time, rating, rejected, xmp_synced_at, xmp_dirty";
 
+// The stored rating wins while it waits to be written to its sidecar (dirty), or once it
+// has been written more recently than the record being upserted was read: a scan works
+// from a snapshot taken when it started, and a rating set and saved meanwhile must
+// survive it.
 const UPSERT: &str = "
 INSERT INTO files (path, folder, size, mtime_ns, capture_time, rating, rejected, xmp_synced_at, xmp_dirty)
 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
@@ -82,9 +86,9 @@ ON CONFLICT(path) DO UPDATE SET
   size = excluded.size,
   mtime_ns = excluded.mtime_ns,
   capture_time = excluded.capture_time,
-  rating = CASE WHEN files.xmp_dirty = 1 THEN files.rating ELSE excluded.rating END,
-  rejected = CASE WHEN files.xmp_dirty = 1 THEN files.rejected ELSE excluded.rejected END,
-  xmp_synced_at = CASE WHEN files.xmp_dirty = 1 THEN files.xmp_synced_at ELSE excluded.xmp_synced_at END,
+  rating = CASE WHEN files.xmp_dirty = 1 OR IFNULL(files.xmp_synced_at, -9223372036854775808) > IFNULL(excluded.xmp_synced_at, -9223372036854775808) THEN files.rating ELSE excluded.rating END,
+  rejected = CASE WHEN files.xmp_dirty = 1 OR IFNULL(files.xmp_synced_at, -9223372036854775808) > IFNULL(excluded.xmp_synced_at, -9223372036854775808) THEN files.rejected ELSE excluded.rejected END,
+  xmp_synced_at = CASE WHEN files.xmp_dirty = 1 OR IFNULL(files.xmp_synced_at, -9223372036854775808) > IFNULL(excluded.xmp_synced_at, -9223372036854775808) THEN files.xmp_synced_at ELSE excluded.xmp_synced_at END,
   xmp_dirty = MAX(files.xmp_dirty, excluded.xmp_dirty)
 ";
 
@@ -460,6 +464,38 @@ mod tests {
             (r.rating, r.rejected, r.xmp_dirty, r.size),
             (2, true, true, 10)
         );
+    }
+
+    #[test]
+    fn upsert_does_not_clobber_rating_synced_after_snapshot() {
+        let mut idx = Index::open_in_memory().unwrap();
+        // A scan read this record before the file was rated...
+        let snapshot = rec("/p/a.jpg");
+        idx.set_rating(&media("/p/a.jpg"), 4, false).unwrap();
+        // ...and the sidecar was written before the scan finished.
+        idx.mark_xmp_synced(Path::new("/p/a.jpg"), 777).unwrap();
+        let mut scanned = snapshot;
+        scanned.capture_time = Some(42);
+        idx.upsert_many(&[scanned]).unwrap();
+        let r = idx.get(Path::new("/p/a.jpg")).unwrap().unwrap();
+        assert_eq!(
+            (r.rating, r.xmp_synced_at, r.capture_time),
+            (4, Some(777), Some(42))
+        );
+    }
+
+    #[test]
+    fn upsert_takes_rating_from_newer_sidecar() {
+        let mut idx = Index::open_in_memory().unwrap();
+        let mut a = rec("/p/a.jpg");
+        a.rating = 2;
+        a.xmp_synced_at = Some(100);
+        idx.upsert_many(&[a.clone()]).unwrap();
+        a.rating = 5;
+        a.xmp_synced_at = Some(200);
+        idx.upsert_many(&[a]).unwrap();
+        let r = idx.get(Path::new("/p/a.jpg")).unwrap().unwrap();
+        assert_eq!((r.rating, r.xmp_synced_at), (5, Some(200)));
     }
 
     #[test]

@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::catalog::pairing::group_into_items;
 use crate::catalog::scan::list_media_files;
@@ -21,7 +22,32 @@ pub struct ScanResult {
     pub folders: Vec<PathBuf>,
 }
 
+/// What a folder's listing shows before any file is opened: its items (ratings from the
+/// index, new files dated by mtime) and subfolders. Sent ahead of the full scan so a slow
+/// folder (a network share) can be shown while capture dates and sidecars are read.
+#[derive(Debug, Default)]
+pub struct Listed {
+    /// Items with `id == 0`.
+    pub items: Vec<Item>,
+    pub folders: Vec<PathBuf>,
+}
+
+/// How many files are read at once for capture dates and sidecars. Parsing is the cost on a
+/// local disk (≈4× faster with 8 threads); a GVFS mount serves one request at a time, so
+/// there it neither helps nor hurts.
+const READ_THREADS: usize = 8;
+
 pub fn scan_folder(folder: &Path, known: &HashMap<PathBuf, FileRecord>) -> io::Result<ScanResult> {
+    scan_folder_with(folder, known, |_| {})
+}
+
+/// Like `scan_folder`, but calls `on_listed` once the folder is listed and before any file
+/// is opened, if the listing found a file the index doesn't know as it is now.
+pub fn scan_folder_with(
+    folder: &Path,
+    known: &HashMap<PathBuf, FileRecord>,
+    on_listed: impl FnOnce(Listed),
+) -> io::Result<ScanResult> {
     let listing = list_media_files(folder)?;
     let folders = listing.folders;
     let mut files = listing.files;
@@ -36,33 +62,22 @@ pub fn scan_folder(folder: &Path, known: &HashMap<PathBuf, FileRecord>) -> io::R
             .filter(|r| listing.incomplete || unreadable.contains(&r.path))
             .filter_map(as_recorded),
     );
+
+    if files.iter().any(|f| !is_unchanged(f, known)) {
+        on_listed(Listed {
+            items: preliminary_items(&files, known),
+            folders: folders.clone(),
+        });
+    }
+
+    let built = par_map(&files, READ_THREADS, |f| build_record(f, known));
     let mut records: HashMap<PathBuf, FileRecord> = HashMap::with_capacity(files.len());
     let mut changed: HashSet<PathBuf> = HashSet::new();
-
-    for f in &files {
-        let mut rec = match known.get(&f.path) {
-            Some(old) if old.size == f.size && old.mtime_ns == f.mtime_ns => old.clone(),
-            Some(old) => {
-                changed.insert(f.path.clone());
-                FileRecord {
-                    size: f.size,
-                    mtime_ns: f.mtime_ns,
-                    capture_time: exif::capture_time(&f.path),
-                    ..old.clone()
-                }
-            }
-            None => {
-                changed.insert(f.path.clone());
-                FileRecord {
-                    capture_time: exif::capture_time(&f.path),
-                    ..FileRecord::new(f.path.clone(), f.size, f.mtime_ns)
-                }
-            }
-        };
-        if import_sidecar(&mut rec) {
-            changed.insert(f.path.clone());
+    for (rec, was_changed) in built {
+        if was_changed {
+            changed.insert(rec.path.clone());
         }
-        records.insert(f.path.clone(), rec);
+        records.insert(rec.path.clone(), rec);
     }
 
     let mut items = group_into_items(files);
@@ -84,6 +99,95 @@ pub fn scan_folder(folder: &Path, known: &HashMap<PathBuf, FileRecord>) -> io::R
         removed,
         folders,
     })
+}
+
+fn is_unchanged(f: &MediaFile, known: &HashMap<PathBuf, FileRecord>) -> bool {
+    known
+        .get(&f.path)
+        .is_some_and(|r| r.size == f.size && r.mtime_ns == f.mtime_ns)
+}
+
+/// Items from the listing and the index alone: no file is opened.
+fn preliminary_items(files: &[MediaFile], known: &HashMap<PathBuf, FileRecord>) -> Vec<Item> {
+    let mut records: HashMap<PathBuf, FileRecord> = files
+        .iter()
+        .map(|f| {
+            let rec = match known.get(&f.path) {
+                Some(old) if old.size == f.size && old.mtime_ns == f.mtime_ns => old.clone(),
+                // Its old capture time may be wrong now; its rating still holds.
+                Some(old) => FileRecord {
+                    size: f.size,
+                    mtime_ns: f.mtime_ns,
+                    capture_time: None,
+                    ..old.clone()
+                },
+                None => FileRecord::new(f.path.clone(), f.size, f.mtime_ns),
+            };
+            (f.path.clone(), rec)
+        })
+        .collect();
+    let mut items = group_into_items(files.to_vec());
+    for item in &mut items {
+        reconcile_item(item, &mut records);
+    }
+    items
+}
+
+/// The file's record after this scan, and whether it differs from the index's.
+fn build_record(f: &MediaFile, known: &HashMap<PathBuf, FileRecord>) -> (FileRecord, bool) {
+    let (mut rec, mut changed) = match known.get(&f.path) {
+        Some(old) if old.size == f.size && old.mtime_ns == f.mtime_ns => (old.clone(), false),
+        Some(old) => (
+            FileRecord {
+                size: f.size,
+                mtime_ns: f.mtime_ns,
+                capture_time: exif::capture_time(&f.path),
+                ..old.clone()
+            },
+            true,
+        ),
+        None => (
+            FileRecord {
+                capture_time: exif::capture_time(&f.path),
+                ..FileRecord::new(f.path.clone(), f.size, f.mtime_ns)
+            },
+            true,
+        ),
+    };
+    if import_sidecar(&mut rec) {
+        changed = true;
+    }
+    (rec, changed)
+}
+
+/// `f` applied to every input on up to `threads` threads; results in input order.
+fn par_map<T: Sync, R: Send>(input: &[T], threads: usize, f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let threads = threads.min(input.len());
+    if threads <= 1 {
+        return input.iter().map(f).collect();
+    }
+    let next = AtomicUsize::new(0);
+    let mut out: Vec<(usize, R)> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..threads)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut done = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(x) = input.get(i) else { break };
+                        done.push((i, f(x)));
+                    }
+                    done
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .flat_map(|w| w.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
+            .collect()
+    });
+    out.sort_unstable_by_key(|(i, _)| *i);
+    out.into_iter().map(|(_, r)| r).collect()
 }
 
 /// The file as last recorded in the index, for keeping one the scan could not read.
@@ -469,6 +573,102 @@ mod tests {
         fs::write(xmp::sidecar_path(&a), b"garbage").unwrap();
         let r = scan_folder(dir.path(), &HashMap::new()).unwrap();
         assert_eq!((r.items[0].rating, r.items[0].rejected), (0, false));
+    }
+
+    fn scan_listed(
+        dir: &Path,
+        known: &HashMap<PathBuf, FileRecord>,
+    ) -> (Option<Listed>, ScanResult) {
+        let mut listed = None;
+        let r = scan_folder_with(dir, known, |l| listed = Some(l)).unwrap();
+        (listed, r)
+    }
+
+    #[test]
+    fn listing_is_reported_before_dates_are_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.jpg");
+        crate::testutil::write_jpeg(&a, 8, 8, [1, 2, 3]);
+        crate::testutil::set_exif(&a, "Exif.Photo.DateTimeOriginal", "2026:09:01 10:15:30");
+        touch(dir.path(), "b.CR3", b"x");
+        touch(dir.path(), "b.JPG", b"x");
+        fs::create_dir(dir.path().join("trip")).unwrap();
+        let (listed, r) = scan_listed(dir.path(), &HashMap::new());
+        let listed = listed.expect("new files: the listing is reported");
+        assert_eq!(listed.items.len(), 2);
+        assert_eq!(listed.folders, [dir.path().join("trip")]);
+        // Not opened yet: dated by mtime.
+        let mtime_s = crate::media::mtime_ns(&fs::metadata(&a).unwrap()) / 1_000_000_000;
+        let la = listed
+            .items
+            .iter()
+            .find(|i| i.display_file().path == a)
+            .unwrap();
+        assert_eq!(la.sort_time, mtime_s);
+        let ra = r.items.iter().find(|i| i.display_file().path == a).unwrap();
+        assert_eq!(ra.sort_time, 1_788_257_730);
+    }
+
+    #[test]
+    fn listing_keeps_known_ratings() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = touch(dir.path(), "a.jpg", b"x");
+        let first = scan_folder(dir.path(), &HashMap::new()).unwrap();
+        let mut known = known_from(&first);
+        known.get_mut(&a).unwrap().rating = 4;
+        touch(dir.path(), "new.jpg", b"x");
+        let (listed, _) = scan_listed(dir.path(), &known);
+        let listed = listed.unwrap();
+        let la = listed
+            .items
+            .iter()
+            .find(|i| i.display_file().path == a)
+            .unwrap();
+        assert_eq!(la.rating, 4);
+        assert_eq!(listed.items.len(), 2);
+    }
+
+    #[test]
+    fn unchanged_folder_reports_no_listing() {
+        let dir = tempfile::tempdir().unwrap();
+        touch(dir.path(), "a.jpg", b"x");
+        let first = scan_folder(dir.path(), &HashMap::new()).unwrap();
+        let (listed, r) = scan_listed(dir.path(), &known_from(&first));
+        assert!(listed.is_none());
+        assert_eq!(r.items.len(), 1);
+    }
+
+    #[test]
+    fn many_files_scan_like_one_at_a_time() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..40 {
+            let p = dir.path().join(format!("img{i:02}.jpg"));
+            crate::testutil::write_jpeg(&p, 4, 4, [i as u8, 0, 0]);
+            let date = format!("2026:01:{:02} 10:00:00", i % 28 + 1);
+            crate::testutil::set_exif(&p, "Exif.Photo.DateTimeOriginal", &date);
+            if i % 5 == 0 {
+                xmp::write_rating(&p, (i % 6) as u8, false).unwrap();
+            }
+        }
+        let r = scan_folder(dir.path(), &HashMap::new()).unwrap();
+        let files: Vec<MediaFile> = list_media_files(dir.path()).unwrap().files;
+        let serial: HashMap<PathBuf, FileRecord> = files
+            .iter()
+            .map(|f| build_record(f, &HashMap::new()).0)
+            .map(|rec| (rec.path.clone(), rec))
+            .collect();
+        assert_eq!(r.upserts.len(), 40);
+        for rec in &r.upserts {
+            assert_eq!(rec, &serial[&rec.path]);
+        }
+    }
+
+    #[test]
+    fn par_map_keeps_order() {
+        let input: Vec<u32> = (0..1000).collect();
+        let out = par_map(&input, 8, |x| x * 2);
+        assert_eq!(out, input.iter().map(|x| x * 2).collect::<Vec<_>>());
+        assert!(par_map(&[] as &[u32], 8, |x| *x).is_empty());
     }
 
     #[test]
